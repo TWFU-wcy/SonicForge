@@ -15,9 +15,21 @@ data class DaemonStatus(
     val error: String?,
     /** 守护进程写入这份状态的时间戳（毫秒），用于判断它是否还活着。 */
     val ts: Long = 0L,
+    /** 本机 DSP 是否支持多段压缩（响度均衡依赖它）。 */
+    val mbcAvailable: Boolean = false,
+    /** 当前输出路由的显示名：「扬声器」「耳机」「蓝牙耳机」等。 */
+    val route: String = "",
+    /** 是否因为输出到耳机/蓝牙而暂停了全部处理。 */
+    val paused: Boolean = false,
 ) {
-    /** 心跳在 8 秒内视为存活。 */
-    fun isAlive(now: Long = System.currentTimeMillis()): Boolean = ok && now - ts in 0..8_000L
+    /**
+     * 心跳在 8 秒内视为存活。
+     *
+     * `paused` 也要算存活：插着耳机时守护进程故意不建链（ok=0），
+     * 但它还在跑、还在盯着路由，拔掉耳机就会自己恢复。
+     */
+    fun isAlive(now: Long = System.currentTimeMillis()): Boolean =
+        (ok || paused) && now - ts in 0..8_000L
 }
 
 /** 守护进程当前生效的配置（从 cmd 文件读回）。 */
@@ -26,7 +38,9 @@ data class DaemonConfigSnapshot(
     val boost: Int,
     val eq: IntArray,
     val bass: Int,
-    val virt: Int,
+    /** 系统音量最大时保留的最小补偿，单位 1/100 dB。 */
+    val boostMin: Int = 120,
+    val leveler: Int = 0,
 )
 
 /**
@@ -48,14 +62,22 @@ class RootDaemonClient(private val context: Context) {
      * 只替换音效那几行，保留 `mixer_*` 行 —— 硬件增益的守护由
      * [writeMixer] 独立维护，两边互不覆盖。
      */
-    fun writeConfig(active: Boolean, boost: Int, eq: IntArray, bass: Int, virt: Int) {
+    fun writeConfig(
+        active: Boolean,
+        boost: Int,
+        eq: IntArray,
+        bass: Int,
+        boostMin: Int = 120,
+        leveler: Int = 0,
+    ) {
         updateLines { lines ->
             lines.removeAll { keyOf(it) in EffectKeys }
             lines += "active=${if (active) 1 else 0}"
             lines += "boost=$boost"
+            lines += "boost_min=$boostMin"
             lines += "eq=${eq.joinToString(",")}"
             lines += "bass=$bass"
-            lines += "virt=$virt"
+            lines += "leveler=$leveler"
         }
     }
 
@@ -130,7 +152,9 @@ class RootDaemonClient(private val context: Context) {
 
         repeat(40) {
             val status = readStatus()
-            if (status != null) return@withContext status.ok
+            // paused 也算启动成功：插着耳机时守护进程会故意不建链，
+            // 但它已经在盯着路由，拔掉耳机就会自己恢复。
+            if (status != null) return@withContext status.ok || status.paused
             delay(150)
         }
         isRunning()
@@ -177,6 +201,9 @@ class RootDaemonClient(private val context: Context) {
         var freqs = IntArray(0)
         var error: String? = null
         var ts = 0L
+        var mbc = false
+        var route = ""
+        var paused = false
         text.lineSequence().forEach { line ->
             val idx = line.indexOf('=')
             if (idx <= 0) return@forEach
@@ -187,11 +214,14 @@ class RootDaemonClient(private val context: Context) {
                 "mode" -> mode = value
                 "pid" -> pid = value.toIntOrNull() ?: 0
                 "freqs" -> freqs = value.split(',').mapNotNull { it.toIntOrNull() }.toIntArray()
+                "mbc" -> mbc = value == "1"
+                "route" -> route = value
+                "paused" -> paused = value == "1"
                 "error" -> error = value.ifBlank { null }
                 "ts" -> ts = value.toLongOrNull() ?: 0L
             }
         }
-        return DaemonStatus(ok, mode, pid, freqs, error, ts)
+        return DaemonStatus(ok, mode, pid, freqs, error, ts, mbc, route, paused)
     }
 
     /** 读回当前生效的配置（App 自己写的 cmd 文件，重启后靠它恢复界面数值）。 */
@@ -202,7 +232,8 @@ class RootDaemonClient(private val context: Context) {
         var boost = 0
         var eq = IntArray(0)
         var bass = 0
-        var virt = 0
+        var boostMin = 120
+        var leveler = 0
         text.lineSequence().forEach { line ->
             val idx = line.indexOf('=')
             if (idx <= 0) return@forEach
@@ -211,12 +242,13 @@ class RootDaemonClient(private val context: Context) {
             when (key) {
                 "active" -> active = value == "1"
                 "boost" -> boost = value.toIntOrNull() ?: 0
+                "boost_min" -> boostMin = value.toIntOrNull() ?: 120
                 "eq" -> eq = value.split(',').mapNotNull { it.toIntOrNull() }.toIntArray()
                 "bass" -> bass = value.toIntOrNull() ?: 0
-                "virt" -> virt = value.toIntOrNull() ?: 0
+                "leveler" -> leveler = value.toIntOrNull() ?: 0
             }
         }
-        DaemonConfigSnapshot(active, boost, eq, bass, virt)
+        DaemonConfigSnapshot(active, boost, eq, bass, boostMin, leveler)
     }.getOrNull()
 
     /** 读取守护进程日志尾部，用于诊断。 */
@@ -228,7 +260,7 @@ class RootDaemonClient(private val context: Context) {
         const val DAEMON_CLASS = "com.sonicforge.app.daemon.RootDaemon"
 
         /** 音效链那几行的 key。 */
-        private val EffectKeys = setOf("active", "boost", "eq", "bass", "virt")
+        private val EffectKeys = setOf("active", "boost", "boost_min", "eq", "bass", "leveler")
 
         /** 硬件音量守护那几行的 key。 */
         private val MixerKeys = setOf("mixer_tool", "mixer_card", "mixer_offset", "mixer_names")

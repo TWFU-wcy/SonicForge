@@ -57,14 +57,27 @@ class MainActivity : ComponentActivity() {
                 val state by engine.state.collectAsState()
                 val rootState by rootManager.state.collectAsState()
                 LaunchedEffect(Unit) { rootManager.refresh() }
+                // 守护进程自己判断耳机/蓝牙并暂停处理，界面每 2 秒同步一次它写回的路由与暂停状态，
+                // 这样插拔耳机时主页的「已暂停」提示不用等用户切后台再回来。
+                LaunchedEffect(state.active) {
+                    while (state.active) {
+                        kotlinx.coroutines.delay(2_000)
+                        engine.refreshRoute()
+                    }
+                }
                 SonicForgeApp(
                     state = state,
                     initialPresetId = lastPreset,
                     onToggle = { enable, presetId ->
                         prefs.edit().putString("preset", presetId).apply()
                         if (enable) {
-                            val preset = Preset.All.firstOrNull { it.id == presetId } ?: Preset.Default
-                            engine.enable(preset)
+                            if (presetId == "custom") {
+                                // 自定义：原样沿用界面上的参数，不要重置回预设
+                                engine.enableCurrent()
+                            } else {
+                                val preset = Preset.All.firstOrNull { it.id == presetId } ?: Preset.Default
+                                engine.enable(preset)
+                            }
                         } else {
                             engine.disable()
                         }
@@ -76,7 +89,7 @@ class MainActivity : ComponentActivity() {
                     onBoostChange = { engine.setBoost(it) },
                     onEqBandChange = { band, db -> engine.setEqBand(band, db) },
                     onBassChange = { engine.setBassBoost(it) },
-                    onVirtualizerChange = { engine.setVirtualizer(it) },
+                    onLevelerChange = { engine.setLeveler(it) },
                     onMonoChange = { enabled ->
                         // 单声道只走 ROOT（settings put system master_mono），
                         // 普通 App 写系统设置需要用户在设置里手动授权，这里不再提供那条路。

@@ -4,12 +4,12 @@ import android.content.res.Configuration
 import android.os.Build
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -45,6 +45,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Home
@@ -115,9 +116,12 @@ import kotlin.math.sin
 /** 底部 Dock 的三个页面 */
 private enum class Tab(val label: String, val icon: ImageVector) {
     HOME("主页", Icons.Filled.Home),
-    EQ("均衡", Icons.Filled.Tune),
+    EQ("调节", Icons.Filled.Tune),
     SETTINGS("设置", Icons.Filled.Settings),
 }
+
+/** 与 AudioEngine.CustomPresetId 保持一致：用户手动改过任一参数后预设就变成「自定义」 */
+private const val CustomPresetId = "custom"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 玻璃拟态基础件
@@ -232,7 +236,7 @@ fun SonicForgeApp(
     onBoostChange: (Int) -> Unit,
     onEqBandChange: (Int, Int) -> Unit,
     onBassChange: (Int) -> Unit,
-    onVirtualizerChange: (Int) -> Unit,
+    onLevelerChange: (Int) -> Unit,
     onMonoChange: (Boolean) -> Unit,
     themeMode: String,
     onThemeModeChange: (String) -> Unit,
@@ -255,27 +259,28 @@ fun SonicForgeApp(
             Box(Modifier.fillMaxSize()) {
                 AnimatedContent(
                     targetState = tab,
-                    // Material 3 的「fade through」：旧页先快速淡出（90ms），
-                    // 新页随后淡入并轻微放大（延迟 90ms）。
-                    // 不用左右滑动 —— 两页都是半透明玻璃卡片，滑动时两页文字会同时可见，
-                    // 叠在一起像重影，比生硬的直接切换更难看。
+                    // 左右平移：新页从侧边滑入，旧页向反方向退出一小段（视差），
+                    // 同时叠一点淡入淡出，避免两页半透明玻璃卡片重叠时文字发虚。
                     transitionSpec = {
+                        val forward = targetState.ordinal > initialState.ordinal
+                        val dir = if (forward) 1 else -1
                         (
-                            fadeIn(
+                            slideInHorizontally(
                                 animationSpec = tween(
-                                    durationMillis = 220,
-                                    delayMillis = 90,
-                                    easing = LinearOutSlowInEasing,
+                                    durationMillis = 300,
+                                    easing = FastOutSlowInEasing,
                                 )
-                            ) + scaleIn(
-                                initialScale = 0.94f,
+                            ) { width -> width * dir } +
+                                fadeIn(animationSpec = tween(durationMillis = 200, delayMillis = 60))
+                            ) togetherWith (
+                            slideOutHorizontally(
                                 animationSpec = tween(
-                                    durationMillis = 220,
-                                    delayMillis = 90,
-                                    easing = LinearOutSlowInEasing,
+                                    durationMillis = 300,
+                                    easing = FastOutSlowInEasing,
                                 )
+                            ) { width -> -width * dir / 4 } +
+                                fadeOut(animationSpec = tween(durationMillis = 160))
                             )
-                            ) togetherWith fadeOut(animationSpec = tween(90))
                     },
                     label = "page",
                 ) { current ->
@@ -292,13 +297,14 @@ fun SonicForgeApp(
                                 onPresetChange = { preset = it },
                                 onToggle = onToggle,
                                 onPresetSelected = onPresetSelected,
-                                onBoostChange = onBoostChange,
+                                onOpenCustom = { tab = Tab.EQ },
                             )
-                            Tab.EQ -> EqPage(
+                            Tab.EQ -> TunePage(
                                 state = state,
+                                onBoostChange = onBoostChange,
                                 onEqBandChange = onEqBandChange,
                                 onBassChange = onBassChange,
-                                onVirtualizerChange = onVirtualizerChange,
+                                onLevelerChange = onLevelerChange,
                             )
                             Tab.SETTINGS -> SettingsPage(
                                 state = state,
@@ -466,7 +472,7 @@ private fun HomePage(
     onPresetChange: (Preset) -> Unit,
     onToggle: (Boolean, String) -> Unit,
     onPresetSelected: (Preset) -> Unit,
-    onBoostChange: (Int) -> Unit,
+    onOpenCustom: () -> Unit,
 ) {
     Column(
         Modifier
@@ -478,6 +484,7 @@ private fun HomePage(
         PageHeader(
             title = "SonicForge",
             subtitle = when {
+                state.pausedForHeadset -> "已连接${state.routeLabel} · 增强已暂停"
                 state.routedToBluetooth -> "已连接蓝牙输出"
                 root.available -> "ROOT 已授权 · 硬件增益可用"
                 else -> "需要 ROOT 才能开启"
@@ -497,29 +504,82 @@ private fun HomePage(
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     GainDial(
-                        progress = if (state.active) (state.boostMillibel / state.maxBoostMillibel.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f) else 0f,
-                        active = state.active,
+                        progress = if (state.active && !state.pausedForHeadset) (state.effectiveBoostMillibel / state.maxBoostMillibel.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f) else 0f,
+                        active = state.active && !state.pausedForHeadset,
                     )
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            text = if (state.active) "+%.1f".format(state.gainDb) else "0.0",
+                            text = if (state.active && !state.pausedForHeadset) "+${state.gainPercent}" else "0",
                             fontSize = 46.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (state.active) MaterialTheme.colorScheme.primary
+                            color = if (state.active && !state.pausedForHeadset) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Text(
-                            text = "dB 增益",
+                            text = "% 响度",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        if (state.active && !state.pausedForHeadset) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = "等效 +%.1f dB".format(state.gainDb),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
                 Spacer(Modifier.height(14.dp))
-                if (state.active) {
+                if (state.pausedForHeadset) {
+                    StatusPill(active = false, text = "耳机输出 · 已暂停")
+                } else if (state.active) {
                     ActiveInfoRow(state = state, preset = preset, hwGainDb = root.appliedDb)
                 } else {
                     StatusPill(active = false)
+                }
+
+                // 增益模型摘要：最大补偿 + 当前档位实际补偿，都收进主卡片
+                Spacer(Modifier.height(16.dp))
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.04f))
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                ) {
+                    Row(Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "当前最大补偿",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            text = "+%d%%".format(Preset.perceivedPercent(state.boostMillibel)),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Row(Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "实际补偿",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            text = if (state.active && !state.pausedForHeadset)
+                                "+${state.gainPercent}% · ${"%.1f".format(state.gainDb)} dB"
+                            else "—",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (state.active && !state.pausedForHeadset) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
 
@@ -535,7 +595,8 @@ private fun HomePage(
                         fontWeight = FontWeight.SemiBold,
                     )
                     Text(
-                        text = if (state.active) "正在实时处理系统音频" else "打开后立即生效",
+                        text = if (state.pausedForHeadset) "耳机输出时不处理，拔出后自动恢复"
+                        else if (state.active) "正在实时处理系统音频" else "打开后立即生效",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -544,8 +605,9 @@ private fun HomePage(
                     checked = state.active,
                     onCheckedChange = { enable ->
                         if (enable) {
-                            onPresetSelected(preset)
-                            onToggle(true, preset.id)
+                            // 用户手动调过参数（自定义）时，打开开关不能把参数重置回某个预设
+                            if (state.presetId != CustomPresetId) onPresetSelected(preset)
+                            onToggle(true, if (state.presetId == CustomPresetId) CustomPresetId else preset.id)
                         } else {
                             onToggle(false, preset.id)
                         }
@@ -582,37 +644,22 @@ private fun HomePage(
         }
 
         Spacer(Modifier.height(18.dp))
-        SectionLabel("主音量增益")
-        Spacer(Modifier.height(10.dp))
-        PaddedGlassCard(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(20.dp),
-            horizontal = 18,
-            vertical = 8,
-        ) {
-            ValueSlider(
-                label = "整体放大",
-                value = state.boostMillibel.toFloat(),
-                range = 0f..state.maxBoostMillibel.toFloat(),
-                display = "+%.1f dB".format(state.gainDb),
-                enabled = state.active,
-                onChange = { onBoostChange(it.toInt()) },
-            )
-        }
-
-        Spacer(Modifier.height(18.dp))
         SectionLabel("预设场景")
         Spacer(Modifier.height(10.dp))
         Preset.All.forEach { item ->
             PresetRow(
                 item = item,
-                selected = item.id == preset.id,
+                selected = state.presetId != CustomPresetId && item.id == preset.id,
                 onClick = {
                     onPresetChange(item)
                     onPresetSelected(item)
                 },
             )
         }
+        CustomPresetRow(
+            selected = state.presetId == CustomPresetId,
+            onClick = onOpenCustom,
+        )
 
         Spacer(Modifier.height(6.dp))
         Text(
@@ -654,8 +701,8 @@ private fun PresetRow(
             ) {
                 Icon(
                     imageVector = when {
-                        item.boostMillibel >= 1200 -> Icons.Filled.Speaker
-                        item.boostMillibel >= 900 -> Icons.Filled.GraphicEq
+                        item.boostMillibel >= 550 -> Icons.Filled.Speaker
+                        item.boostMillibel >= 400 -> Icons.Filled.GraphicEq
                         else -> Icons.Filled.Headphones
                     },
                     contentDescription = null,
@@ -675,8 +722,9 @@ private fun PresetRow(
                 )
                 Spacer(Modifier.height(3.dp))
                 Text(
-                    text = "+%.1f dB · 低音 %d%%".format(
-                        item.boostMillibel / 100f,
+                    text = "+%d%% ~ +%d%% · 低音 %d%%".format(
+                        Preset.perceivedPercent(item.minBoostMillibel),
+                        Preset.perceivedPercent(item.boostMillibel),
                         item.bassBoostStrength / 10,
                     ),
                     style = MaterialTheme.typography.bodySmall,
@@ -704,7 +752,68 @@ private fun PresetRow(
 }
 
 /**
- * 开启后显示的处理细节：低音、声道、环绕、当前预设。
+ * 「自定义」预设入口：点一下跳到「调节」页自己拖。
+ * 和预设卡长得一样，只是右侧是箭头而不是选中勾。
+ */
+@Composable
+private fun CustomPresetRow(
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    PaddedGlassCard(
+        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+        shape = RoundedCornerShape(22.dp),
+        horizontal = 18,
+        vertical = 14,
+        onClick = onClick,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Tune,
+                    contentDescription = null,
+                    tint = if (selected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = "自定义",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (selected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = "自己调增益上限、均衡与低音",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Icon(
+                imageVector = Icons.Filled.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+    }
+}
+
+/**
+ * 开启后显示的处理细节：低音、响度均衡、限幅、当前预设。
  * 与下方「主音量增益」滑杆区分开，避免只重复展示 dB。
  */
 @OptIn(ExperimentalLayoutApi::class)
@@ -714,8 +823,8 @@ private fun ActiveInfoRow(state: AudioState, preset: Preset, hwGainDb: Int = 0) 
         if (hwGainDb > 0) add("硬件 +${hwGainDb}dB")
         if (state.mode == EngineMode.ROOT) add("ROOT 全局音效")
         add("低音 ${state.bassBoostStrength / 10}%")
+        if (state.levelerStrength > 0) add("响度均衡 ${state.levelerStrength / 10}%")
         if (state.limiterActive) add("限幅保护")
-        if (state.virtualizerStrength > 0) add("环绕 ${state.virtualizerStrength / 10}%")
         add(preset.label)
     }
     FlowRow(
@@ -741,7 +850,8 @@ private fun InfoChip(text: String) {
 }
 
 @Composable
-private fun StatusPill(active: Boolean) {    val t by animateFloatAsState(
+private fun StatusPill(active: Boolean, text: String? = null) {
+    val t by animateFloatAsState(
         targetValue = if (active) 1f else 0f,
         animationSpec = tween(240),
         label = "pillT",
@@ -767,7 +877,7 @@ private fun StatusPill(active: Boolean) {    val t by animateFloatAsState(
         )
         Spacer(Modifier.width(7.dp))
         Text(
-            text = if (active) "运行中" else "已关闭",
+            text = text ?: if (active) "运行中" else "已关闭",
             style = MaterialTheme.typography.labelMedium,
             fontWeight = FontWeight.Medium,
             color = fg,
@@ -852,11 +962,12 @@ private fun formatFreq(hz: Int): String = when {
 }
 
 @Composable
-private fun EqPage(
+private fun TunePage(
     state: AudioState,
+    onBoostChange: (Int) -> Unit,
     onEqBandChange: (Int, Int) -> Unit,
     onBassChange: (Int) -> Unit,
-    onVirtualizerChange: (Int) -> Unit,
+    onLevelerChange: (Int) -> Unit,
 ) {
     Column(
         Modifier
@@ -866,18 +977,46 @@ private fun EqPage(
     ) {
         Spacer(Modifier.height(12.dp))
         PageHeader(
-            title = "均衡器",
-            subtitle = if (state.eqBandCount > 0)
-                "${state.eqBandCount} 段均衡器 · 调节范围 ±6 dB"
-            else "开启后读取设备真实频段",
+            title = "调节",
+            subtitle = if (state.active) "所有改动实时生效" else "开启增强后可调",
         )
         Spacer(Modifier.height(20.dp))
 
+        // 增益上限（从主页搬过来）
+        SectionLabel("增益上限")
+        Spacer(Modifier.height(10.dp))
+        PaddedGlassCard(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            horizontal = 18,
+            vertical = 8,
+        ) {
+            ValueSlider(
+                label = "最大补偿",
+                value = state.boostMillibel.toFloat(),
+                range = Preset.FloorBoostMillibel.toFloat()..state.maxBoostMillibel.toFloat(),
+                display = "+%d%%".format(Preset.perceivedPercent(state.boostMillibel)),
+                enabled = state.active && !state.pausedForHeadset,
+                onChange = { onBoostChange(it.toInt()) },
+            )
+        }
+
+        Spacer(Modifier.height(18.dp))
+        SectionLabel("均衡器")
+        Spacer(Modifier.height(10.dp))
         PaddedGlassCard(
             modifier = Modifier.fillMaxWidth(),
             horizontal = 18,
             vertical = 16,
         ) {
+            Text(
+                text = if (state.eqBandCount > 0)
+                    "${state.eqBandCount} 段 · 每段 ±6 dB"
+                else "开启后读取设备真实频段",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 8.dp),
+            )
             if (state.eqCenterFreqs.isEmpty()) {
                 Text(
                     text = "开启增强后，这里会显示 10 段均衡频段（由 ROOT 守护进程在全局混音上建立）",
@@ -902,7 +1041,7 @@ private fun EqPage(
                         value = level.toFloat(),
                         onValueChange = { onEqBandChange(index, it.toInt()) },
                         valueRange = -600f..600f,
-                        enabled = state.active,
+                        enabled = state.active && !state.pausedForHeadset,
                         colors = SliderDefaults.colors(
                             thumbColor = MaterialTheme.colorScheme.primary,
                             activeTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
@@ -938,18 +1077,28 @@ private fun EqPage(
                 value = state.bassBoostStrength.toFloat(),
                 range = 0f..1000f,
                 display = "%d%%".format(state.bassBoostStrength / 10),
-                enabled = state.active,
+                enabled = state.active && !state.pausedForHeadset,
                 onChange = { onBassChange(it.toInt()) },
             )
             Spacer(Modifier.height(4.dp))
             ValueSlider(
-                label = "虚拟环绕",
-                value = state.virtualizerStrength.toFloat(),
+                label = "响度均衡",
+                value = state.levelerStrength.toFloat(),
                 range = 0f..1000f,
-                display = if (state.virtualizerAvailable) "%d%%".format(state.virtualizerStrength / 10)
-                else "仅耳机可用",
-                enabled = state.active && state.virtualizerAvailable,
-                onChange = { onVirtualizerChange(it.toInt()) },
+                display = when {
+                    !state.active -> "需开启增强"
+                    !state.levelerAvailable -> "本机不支持"
+                    state.levelerStrength == 0 -> "关闭"
+                    else -> "%d%%".format(state.levelerStrength / 10)
+                },
+                enabled = state.active && !state.pausedForHeadset && state.levelerAvailable,
+                onChange = { onLevelerChange(it.toInt()) },
+            )
+            Text(
+                text = "把视频忽大忽小的音量拉平，整体响度不变",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                modifier = Modifier.padding(top = 6.dp, bottom = 6.dp),
             )
         }
 
@@ -1089,14 +1238,17 @@ private fun SettingsPage(
             horizontal = 18,
             vertical = 18,
         ) {
-            InfoRow("输出路由", state.routeLabel)
+            InfoRow(
+                "输出路由",
+                if (state.pausedForHeadset) "${state.routeLabel}（增强已暂停）" else state.routeLabel,
+            )
             Spacer(Modifier.height(12.dp))
             InfoRow(
                 "当前预设",
                 Preset.All.firstOrNull { it.id == state.presetId }?.label ?: "自定义",
             )
             Spacer(Modifier.height(12.dp))
-            InfoRow("版本", "1.2.0")
+            InfoRow("版本", "1.3.4")
         }
 
         Spacer(Modifier.height(120.dp))
@@ -1392,15 +1544,20 @@ private fun ValueSlider(
 private fun previewState() = AudioState(
     active = true,
     mode = EngineMode.ROOT,
-    boostMillibel = 1200,
+    boostMillibel = 500,
+    minBoostMillibel = Preset.FloorBoostMillibel,
+    effectiveBoostMillibel = 380,
+    systemVolume = 6,
+    maxSystemVolume = 15,
     eqLevelsDb = intArrayOf(0, 120, 0, -60, 0, 60, 0, 0, -120, 0),
     eqCenterFreqs = intArrayOf(31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000),
     bassBoostStrength = 400,
-    virtualizerStrength = 200,
     limiterActive = true,
     mono = false,
     presetId = "default",
     routedToBluetooth = false,
+    levelerStrength = 500,
+    levelerAvailable = true,
 )
 
 @Preview(
@@ -1421,7 +1578,7 @@ private fun PreviewHomeDark() {
             onBoostChange = {},
             onEqBandChange = { _, _ -> },
             onBassChange = {},
-            onVirtualizerChange = {},
+            onLevelerChange = {},
             onMonoChange = {},
             themeMode = "system",
             onThemeModeChange = {},
@@ -1447,7 +1604,7 @@ private fun PreviewHomeLight() {
             onBoostChange = {},
             onEqBandChange = { _, _ -> },
             onBassChange = {},
-            onVirtualizerChange = {},
+            onLevelerChange = {},
             onMonoChange = {},
             themeMode = "light",
             onThemeModeChange = {},
@@ -1468,7 +1625,7 @@ private fun PreviewEqDark() {
     SonicForgeTheme(darkTheme = true) {
         Box(Modifier.fillMaxSize()) {
             AppBackground()
-            EqPage(previewState(), { _, _ -> }, {}, {})
+            TunePage(previewState(), {}, { _, _ -> }, {}, {})
         }
     }
 }
