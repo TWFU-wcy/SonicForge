@@ -1,0 +1,41 @@
+# Gradle
+.gradle/
+build/
+app/build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Kotlin
+.kotlin/
+
+# 构建产物
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+*.hprof
+
+# 签名
+*.jks
+*.keystore
+keystore.properties
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 工作区临时文件（不属于源码）
+App.kt.bak
+jadx.zip
+build-shots/
+/screenshots/

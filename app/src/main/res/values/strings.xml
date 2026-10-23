@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">音量增强</string>
+    <string name="notification_channel_name">增强服务</string>
+    <string name="notification_text">音量增强运行中，打开应用可调整或关闭</string>
+</resources>
