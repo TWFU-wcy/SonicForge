@@ -9,6 +9,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -87,6 +88,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -321,12 +323,15 @@ private fun GlassDock(
     selected: Tab,
     onSelect: (Tab) -> Unit,
 ) {
-    val shape = RoundedCornerShape(34.dp)
+    // 外层圆角 28dp，内部选中态胶囊用 16dp 圆角 —— 二者同一套圆角语言，不会出现「圆角框里套一个正圆」
+    val shape = RoundedCornerShape(28.dp)
 
     Row(
         modifier
             .padding(horizontal = 26.dp, vertical = 14.dp)
-            .fillMaxWidth()
+            // 触摸拦截层：正好覆盖整块玻璃（含图标之间的空隙），空白处也吞掉点击，
+            // 不会穿透到底下的开关/预设卡片。子项 clickable 先消费事件，父层只兜底。
+            .pointerInput(Unit) { detectTapGestures { } }
             .glass(
                 shape = shape,
                 fillTop = 0.78f,
@@ -337,8 +342,8 @@ private fun GlassDock(
                 darkScale = 0.90f,
                 darkTint = Color(0xFF12151D),
             )
-            .padding(horizontal = 8.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.SpaceEvenly,
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Tab.entries.forEach { item ->
@@ -351,7 +356,10 @@ private fun GlassDock(
     }
 }
 
-/** 纯图标 Dock：尺寸固定，没有文字，就不会被文字撑高、也不会留空 */
+/**
+ * 纯图标 Dock：尺寸固定，没有文字，就不会被文字撑高、也不会留空。
+ * 点击热区（68×52）明显大于视觉胶囊（52×42），不用瞄准也能点中。
+ */
 @Composable
 private fun DockItem(tab: Tab, selected: Boolean, onClick: () -> Unit) {
     val sel by animateFloatAsState(
@@ -364,22 +372,28 @@ private fun DockItem(tab: Tab, selected: Boolean, onClick: () -> Unit) {
         MaterialTheme.colorScheme.primary,
         sel,
     )
-    val pill = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f * sel)
+    val pill = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f * sel)
 
     Box(
         modifier = Modifier
-            .size(52.dp)
-            .clip(CircleShape)
-            .background(pill)
+            .size(width = 68.dp, height = 52.dp)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            imageVector = tab.icon,
-            contentDescription = tab.label,
-            tint = tint,
-            modifier = Modifier.size((23f + 2f * sel).dp),
-        )
+        Box(
+            modifier = Modifier
+                .size(width = 52.dp, height = 42.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .background(pill),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = tab.icon,
+                contentDescription = tab.label,
+                tint = tint,
+                modifier = Modifier.size((22f + 2f * sel).dp),
+            )
+        }
     }
 }
 
@@ -1025,7 +1039,7 @@ private fun SettingsPage(
                 Preset.All.firstOrNull { it.id == state.presetId }?.label ?: state.presetId,
             )
             Spacer(Modifier.height(12.dp))
-            InfoRow("版本", "1.1.2")
+            InfoRow("版本", "1.1.3")
         }
 
         Spacer(Modifier.height(120.dp))
