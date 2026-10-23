@@ -60,9 +60,13 @@
 
 ## 安装与使用
 
+从 [Releases](https://github.com/TWFU-wcy/SonicForge/releases) 下载 `SonicForge-<version>.apk` 安装，或本地构建后：
+
 ```bash
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
+
+> 1.2.0 起包名从 `com.volumeboost.app` 改为 `com.sonicforge.app`，装过旧版的请先 `adb uninstall com.volumeboost.app`。
 
 1. **先注入 ROOT**（临时 ROOT 工具如 HyperBreak，或已持久化的 KernelSU / Magisk），确认 `su` 可用
 2. 打开 App，首次会弹 su 授权框，点「允许」
@@ -122,7 +126,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 两种可能：设备没有 `tinymix`（部分 ROM 精简掉了），或者没匹配到可写的输出音量控件。打开设置页「音效诊断」，看「混音器工具」「声卡」「匹配到的音量控制」三行；若「控制项总数」不为 0 但「匹配到的音量控制」为 0，把诊断里那段「候选控制项」列表贴到 issue，即可补充匹配规则。
 
 **调了系统音量之后增强好像没了**
-不会掉。守护进程每 1.2 秒核对一次，发现 codec 音量被系统重写就按新音量重新补上偏移。若想确认，拖一下硬件增益滑杆，明细里会显示当前写入值。
+不会掉。守护进程每 1.2 秒核对一次，发现 codec 音量被系统重写就按新音量重新补上偏移。想确认的话，设置页「音效诊断」里会显示当前生效的硬件增益 dB 数。
 
 **重启后失效**
 临时 ROOT 重启即失效，属预期行为。持久化 ROOT（KernelSU / Magisk 模块）可做到开机自启。
