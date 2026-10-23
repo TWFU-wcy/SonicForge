@@ -74,7 +74,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 | 能力 | 做法 | 说明 |
 |---|---|---|
 | **ROOT 全局音效** | 用 `su` 起一个 uid 0 的 `app_process` 守护进程（`RootDaemon`），在进程内把 `DynamicsProcessing` 挂到 session 0 | 普通 App 创建全局音效会被 AudioFlinger 以缺少 `MODIFY_AUDIO_ROUTING` 拒绝；uid 0 进程不受此限制，这是真机报「系统拒绝了音效创建」的正解 |
-| **硬件增益** | `tinymix` 读写 codec 的 `* Digital Volume` 控件 | 唯一能突破「数字信号已到 0 dBFS」天花板的手段，最高 +12 dB；以首次应用前的原始值为基准，反复拖动不叠加，可一键恢复 |
+| **硬件增益** | `tinymix` 读写 codec 的扬声器音量控件 | 唯一能突破「数字信号已到 0 dBFS」天花板的手段，最高 +12 dB；以首次应用前的原始值为基准，反复拖动不叠加，可一键恢复 |
 | **释放全局音效通道** | `pm disable-user --user 0 <厂商音效包>` + `setprop ctl.restart audioserver` | 杜比 / DTS / 小米音效会独占 session 0 的音效链路，禁掉后本应用的音效才能挂上去；可随时恢复 |
 
 ### 守护进程
@@ -113,7 +113,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 到设置页点「音效诊断」，看 `【ROOT 守护进程】` 段：`mode=FULL` 表示链路正常；`mode=DEGRADED` 表示只挂上了 LoudnessEnhancer；`error` 行会写明失败原因。把这段文本贴到 issue 里即可定位。
 
 **硬件增益滑杆是灰的**
-设备没有 `tinymix`（部分 ROM 精简掉了）。其余功能不受影响，可在诊断里确认「混音器工具」。
+两种可能：设备没有 `tinymix`（部分 ROM 精简掉了），或者没匹配到可写的输出音量控件。打开设置页「音效诊断」，看「混音器工具」「声卡」「匹配到的音量控制」三行；若「控制项总数」不为 0 但「匹配到的音量控制」为 0，把诊断里那段「候选控制项」列表贴到 issue，即可补充匹配规则。
 
 **重启后失效**
 临时 ROOT 重启即失效，属预期行为。持久化 ROOT（KernelSU / Magisk 模块）可做到开机自启。

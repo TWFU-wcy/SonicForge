@@ -1025,7 +1025,7 @@ private fun SettingsPage(
                 Preset.All.firstOrNull { it.id == state.presetId }?.label ?: state.presetId,
             )
             Spacer(Modifier.height(12.dp))
-            InfoRow("版本", "1.1.0")
+            InfoRow("版本", "1.1.1")
         }
 
         Spacer(Modifier.height(120.dp))
@@ -1191,7 +1191,12 @@ private fun RootSection(
                 )
                 Text(
                     text = root.appliedDetail
-                        ?: "直接抬高 codec 数字音量，突破数字信号 0 dBFS 的天花板",
+                        ?: buildString {
+                            if (root.cardName != null) {
+                                append("声卡 ${root.cardIndex}（${root.cardName}）· ${root.targets.size} 个音量控制\n")
+                            }
+                            append("直接抬高 codec 数字音量，突破数字信号 0 dBFS 的天花板")
+                        },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

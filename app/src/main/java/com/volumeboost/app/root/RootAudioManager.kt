@@ -19,6 +19,10 @@ data class RootState(
     val suPath: String? = null,
     /** 实际使用的混音器工具路径，null 表示没找到或打不开。 */
     val mixerTool: String? = null,
+    /** 实际选中的声卡编号（tinymix -D 的参数）。 */
+    val cardIndex: Int = -1,
+    /** 选中声卡的名字，例如 `msm8998-tasha-snd-card`。 */
+    val cardName: String? = null,
     /** 混音器控制项总数。 */
     val controlCount: Int = 0,
     /** 被判定为「输出音量」的控制项。 */
@@ -57,15 +61,33 @@ class RootAudioManager private constructor(private val context: Context) {
         /** Qualcomm codec 的 Digital Volume 通常是 0.5 dB 一档。 */
         private const val UnitsPerDb = 2
 
-        private val GainNameRegex =
-            Regex("(?i)(speaker|spk|spkr|spkm|rx[0-9]|hph|headphone|earpiece|mono|dac)")
+        /** 最多扫描多少张声卡（card 0..MaxCardScan-1）。 */
+        private const val MaxCardScan = 8
 
-        private val ExcludeRegex =
-            Regex("(?i)(mic|adc|dec|tx|capture|record|input|dmic|amix|aif|vad|voice|call)")
+        /**
+         * 输出音量控制的候选名。
+         *
+         * 覆盖 Qualcomm 的 RX / Spkr / WSA / PA Volume、
+         * 智能功放的 aw / tas / cs35 系列，以及通用的 Master / PCM / Digital Volume。
+         */
+        private val GainNameRegex = Regex(
+            "(?i)(speaker|spk|spkr|spkm|spkl|rx[0-9]|rx[ _]|hph|headphone|earpiece|" +
+                "master|pcm|digital volume|pa volume|boost volume|dac|mono|wsa|aw8|tas25|cs35)"
+        )
+
+        /** 明确是录音侧 / 通话侧的控制，绝不能动。 */
+        private val ExcludeRegex = Regex(
+            "(?i)(mic|adc|dec|tx[ _0-9]|capture|record|input|dmic|amix|aif|vad|voice|call|" +
+                "hfi|slim|echo|aec|ns\\b)"
+        )
 
         private val VendorKeywords = listOf(
-            "dolby", "dax", "dts", "audioeffect", "audio.effect", "harman", "miui.audio",
+            "dolby", "dax", "dts", "audioeffect", "audio.effect", "harman",
+            "miui.audio", "miui.sound", "misound", "spatializer", "bsp.audio",
         )
+
+        /** 名字里带这些的不是「音效处理器」，禁用了没意义甚至有害。 */
+        private val VendorExclude = listOf("monitor", "capture", "listener", "diagnostic")
 
         @Volatile
         private var instance: RootAudioManager? = null
@@ -81,6 +103,9 @@ class RootAudioManager private constructor(private val context: Context) {
 
     @Volatile
     private var mixerTool: String? = null
+
+    @Volatile
+    private var cardIndex: Int = -1
 
     // ── 检测 ────────────────────────────────────────────────────────────────
 
@@ -100,8 +125,12 @@ class RootAudioManager private constructor(private val context: Context) {
 
         val tool = findMixerTool()
         mixerTool = tool
-        val dump = if (tool != null) readDump(tool) else ""
-        val controls = MixerParser.parse(dump)
+
+        val scanLog = StringBuilder()
+        val scan = if (tool != null) scanCards(tool, scanLog) else null
+        val best = scan?.best
+        cardIndex = best?.cardIndex ?: -1
+        val controls = best?.controls.orEmpty()
         val targets = pickTargets(controls)
         val mono = readMono()
         val vendor = readVendorPackages()
@@ -111,15 +140,21 @@ class RootAudioManager private constructor(private val context: Context) {
             appendLine("ROOT 诊断")
             appendLine("· su：$su")
             appendLine("· 混音器工具：${tool ?: "未找到"}")
+            appendLine("· 声卡：${best?.let { "card ${it.cardIndex}（${it.name}）" } ?: "未识别"}")
             appendLine("· 控制项总数：${controls.size}")
             appendLine("· 匹配到的音量控制：${targets.size}")
             targets.take(12).forEach { appendLine("   - ${it.describe()}") }
             appendLine("· 系统单声道：${if (mono) "开" else "关"}")
             appendLine("· 厂商音效包：${if (vendor.isEmpty()) "未发现" else vendor.joinToString()}")
-            if (dump.isNotBlank()) {
+            if (scanLog.isNotEmpty()) {
+                appendLine()
+                appendLine("声卡扫描：")
+                appendLine(scanLog.toString().trimEnd())
+            }
+            if (dumpTail.isNotEmpty()) {
                 appendLine()
                 appendLine("混音器原始输出（前 20 行）：")
-                dump.lines().take(20).forEach { appendLine(it) }
+                appendLine(dumpTail)
             }
             if (tool == null) {
                 appendLine()
@@ -128,7 +163,16 @@ class RootAudioManager private constructor(private val context: Context) {
                 appendLine("或确认 /vendor/bin/tinymix 存在且可执行。")
             } else if (controls.isEmpty()) {
                 appendLine()
-                appendLine("tinymix 存在但读不到控制项（可能是模拟器或没有硬件 codec）。")
+                appendLine("tinymix 存在但读不到控制项。")
+            } else if (targets.isEmpty()) {
+                appendLine()
+                appendLine("能读到控制项，但没有匹配到可写的输出音量控制。")
+                appendLine("请把下面这段「候选控制项」发给开发者，以便补充匹配规则：")
+                appendLine("──────")
+                controls.filter { it.type.equals("INT", true) }
+                    .take(60)
+                    .forEach { appendLine("${it.index}\t${it.name}\t${it.describe()}") }
+                appendLine("──────")
             }
         }
 
@@ -137,6 +181,8 @@ class RootAudioManager private constructor(private val context: Context) {
             available = true,
             suPath = su,
             mixerTool = tool,
+            cardIndex = best?.cardIndex ?: -1,
+            cardName = best?.name,
             controlCount = controls.size,
             targets = targets,
             appliedDb = prefs.getInt("gain_db", 0),
@@ -154,12 +200,88 @@ class RootAudioManager private constructor(private val context: Context) {
         )
     }
 
+    /** 最近一次 dump 的尾部，供诊断展示。 */
+    private var dumpTail: String = ""
+
+    /** 一张声卡的扫描结果。 */
+    private class CardScan(
+        val cardIndex: Int,
+        val name: String,
+        val controls: List<MixerControl>,
+        val candidates: List<MixerControl>,
+    )
+
+    private class ScanResult(val best: CardScan?, val log: String)
+
+    /**
+     * 逐个声卡试 `tinymix -D n -a`，挑出真正带输出音量控制的那张。
+     *
+     * 这一步是必需的：小米这类机器上 card 0 往往是 `art-mtp-snd-card`（USB 音频回环），
+     * 真正的 codec 在 card 1 或更后面，直接用默认 card 0 只会读到一堆 TX/BOOL 控制。
+     */
+    private suspend fun scanCards(tool: String, log: StringBuilder): ScanResult {
+        val names = readCardNames()
+        var best: CardScan? = null
+        var bestScore = 0
+
+        for (card in 0 until MaxCardScan) {
+            val r = RootShell.exec("$tool -D $card -a 2>&1", 15_000L)
+            var out = r.output
+            if (out.isBlank()) continue
+            if (out.contains("Failed", ignoreCase = true) ||
+                out.contains("cannot open", ignoreCase = true) ||
+                out.contains("No such", ignoreCase = true)
+            ) {
+                log.appendLine("· card $card：打不开")
+                continue
+            }
+            var controls = MixerParser.parse(out)
+            // 老版本 tinymix 没有 -a（all-values），解析为空时退回不带 -a 的用法
+            if (controls.isEmpty()) {
+                out = RootShell.exec("$tool -D $card 2>&1", 15_000L).output
+                controls = MixerParser.parse(out)
+            }
+            if (controls.isEmpty()) {
+                log.appendLine("· card $card：${names[card] ?: "?"} · 解析到 0 项")
+                continue
+            }
+            val candidates = pickTargets(controls)
+            val name = MixerParser.mixerName(out) ?: names[card] ?: "unknown"
+            log.appendLine("· card $card：$name · ${controls.size} 项 · 音量候选 ${candidates.size}")
+            // 打分：有候选的优先，其次控制项多的优先
+            val score = candidates.size * 1000 + controls.size
+            if (candidates.isNotEmpty() && score > bestScore) {
+                bestScore = score
+                best = CardScan(card, name, controls, candidates)
+                dumpTail = out.lines().take(20).joinToString("\n")
+            } else if (best == null && controls.size > 0) {
+                // 先记一个「至少能读」的兜底，等更好的出现再替换
+                best = CardScan(card, name, controls, candidates)
+                dumpTail = out.lines().take(20).joinToString("\n")
+            }
+        }
+        return ScanResult(best, log.toString())
+    }
+
+    /** 读 /proc/asound/cards，得到 card 编号 → 名字。 */
+    private suspend fun readCardNames(): Map<Int, String> {
+        val text = RootShell.read("cat /proc/asound/cards 2>/dev/null", 6_000L) ?: return emptyMap()
+        val map = LinkedHashMap<Int, String>()
+        val regex = Regex("""^\s*(\d+)\s+\[([^\]]*)\]:\s*(\S+)""")
+        for (line in text.lineSequence()) {
+            val m = regex.find(line) ?: continue
+            val idx = m.groupValues[1].toIntOrNull() ?: continue
+            map[idx] = m.groupValues[3]
+        }
+        return map
+    }
+
     /** 找可用的混音器工具；找到但打不开的（模拟器）视为不可用。 */
     private suspend fun findMixerTool(): String? {
         val tinymix = which("tinymix")
-        if (tinymix != null && probeMixer(tinymix)) return tinymix
+        if (tinymix != null) return tinymix
         val amixer = which("amixer")
-        if (amixer != null && probeMixer(amixer)) return amixer
+        if (amixer != null) return amixer
         return null
     }
 
@@ -174,23 +296,12 @@ class RootAudioManager private constructor(private val context: Context) {
             .firstOrNull { it.startsWith("/") }
     }
 
-    private suspend fun probeMixer(path: String): Boolean {
-        val r = RootShell.exec("$path -D 0 2>&1 | head -30", 10_000L)
-        return !r.output.contains("Failed", ignoreCase = true) && r.output.isNotBlank()
-    }
-
-    private suspend fun readDump(tool: String): String {
-        val withRange = RootShell.exec("$tool -D 0 -a 2>&1", 20_000L)
-        if (MixerParser.parse(withRange.output).isNotEmpty()) return withRange.output
-        return RootShell.exec("$tool -D 0 2>&1", 20_000L).output
-    }
-
     /** 从所有控制项里挑出「输出音量」。 */
     private fun pickTargets(controls: List<MixerControl>): List<MixerControl> {
         val candidates = controls.filter { control ->
-            val name = control.name.lowercase()
+            val name = control.name
             control.writable &&
-                name.contains("volume") &&
+                name.contains("volume", ignoreCase = true) &&
                 !ExcludeRegex.containsMatchIn(name) &&
                 GainNameRegex.containsMatchIn(name)
         }
@@ -198,7 +309,8 @@ class RootAudioManager private constructor(private val context: Context) {
         // 有扬声器专用控制时只动扬声器，避免把耳机音量一起抬上去
         val speakerOnly = candidates.filter {
             val n = it.name.lowercase()
-            n.contains("speaker") || n.contains("spk") || n.contains("mono")
+            n.contains("speaker") || n.contains("spk") || n.contains("mono") ||
+                n.contains("wsa") || n.contains("aw8") || n.contains("tas25") || n.contains("cs35")
         }
         return if (speakerOnly.isNotEmpty()) speakerOnly else candidates
     }
@@ -213,8 +325,9 @@ class RootAudioManager private constructor(private val context: Context) {
      */
     suspend fun applyGain(db: Int): Boolean = withContext(Dispatchers.IO) {
         val tool = mixerTool
+        val card = cardIndex
         val targets = _state.value.targets
-        if (tool == null || targets.isEmpty()) {
+        if (tool == null || card < 0 || targets.isEmpty()) {
             _state.value = _state.value.copy(error = "没有可写的硬件音量控制")
             return@withContext false
         }
@@ -229,7 +342,7 @@ class RootAudioManager private constructor(private val context: Context) {
             val max = control.max ?: base
             val min = control.min ?: 0
             val target = (base + db * UnitsPerDb).coerceIn(min, max)
-            if (setControl(tool, control, target)) {
+            if (setControl(tool, card, control, target)) {
                 success++
                 details += "${control.name} $base→$target"
             }
@@ -253,8 +366,9 @@ class RootAudioManager private constructor(private val context: Context) {
     /** 恢复到第一次应用前的原始值。 */
     suspend fun restore(): Boolean = withContext(Dispatchers.IO) {
         val tool = mixerTool
+        val card = cardIndex
         val originals = loadOriginals()
-        if (tool == null || originals.isEmpty()) {
+        if (tool == null || card < 0 || originals.isEmpty()) {
             prefs.edit().remove("gain_db").remove("detail").remove("originals").apply()
             _state.value = _state.value.copy(appliedDb = 0, appliedDetail = null)
             return@withContext true
@@ -262,7 +376,7 @@ class RootAudioManager private constructor(private val context: Context) {
         var success = 0
         for (control in _state.value.targets) {
             val original = originals[control.name] ?: continue
-            if (setControl(tool, control, original)) success++
+            if (setControl(tool, card, control, original)) success++
         }
         prefs.edit().remove("gain_db").remove("detail").remove("originals").apply()
         _state.value = _state.value.copy(
@@ -273,11 +387,16 @@ class RootAudioManager private constructor(private val context: Context) {
         success > 0 || originals.isEmpty()
     }
 
-    private suspend fun setControl(tool: String, control: MixerControl, value: Int): Boolean {
+    private suspend fun setControl(
+        tool: String,
+        card: Int,
+        control: MixerControl,
+        value: Int,
+    ): Boolean {
         val safeName = control.name.replace("\"", "").replace("$", "").replace("`", "")
-        val byName = RootShell.exec("$tool -D 0 \"$safeName\" $value 2>&1", 8_000L)
+        val byName = RootShell.exec("$tool -D $card \"$safeName\" $value 2>&1", 8_000L)
         if (byName.ok && !byName.looksFailed) return true
-        val byIndex = RootShell.exec("$tool -D 0 ${control.index} $value 2>&1", 8_000L)
+        val byIndex = RootShell.exec("$tool -D $card ${control.index} $value 2>&1", 8_000L)
         return byIndex.ok && !byIndex.looksFailed
     }
 
@@ -318,7 +437,11 @@ class RootAudioManager private constructor(private val context: Context) {
         val output = RootShell.read("pm list packages 2>/dev/null", 12_000L) ?: return emptyList()
         return output.lineSequence()
             .map { it.removePrefix("package:").trim() }
-            .filter { pkg -> VendorKeywords.any { pkg.lowercase().contains(it) } }
+            .filter { pkg ->
+                val lower = pkg.lowercase()
+                VendorKeywords.any { lower.contains(it) } &&
+                    VendorExclude.none { lower.contains(it) }
+            }
             .distinct()
             .sorted()
             .toList()
