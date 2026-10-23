@@ -451,7 +451,10 @@ private fun DockItem(tab: Tab, selected: Boolean, onClick: () -> Unit) {
                     scaleX = pressScale
                     scaleY = pressScale
                 }
-                .clip(RoundedCornerShape(16.dp))
+                // 同心圆角：内圆角 = 外圆角 - 间距 = 28 - 8 = 20dp。
+                // 只有这样，胶囊边到玻璃边才是「每一处都 8dp」，角上不会忽然变厚变薄。
+                // 胶囊高 40dp、半径 20dp，两端正好是半圆，与玻璃（高 56dp、半径 28dp）同形同心。
+                .clip(RoundedCornerShape(20.dp))
                 .background(pill),
             contentAlignment = Alignment.Center,
         ) {
@@ -1263,7 +1266,7 @@ private fun SettingsPage(
                 Preset.All.firstOrNull { it.id == state.presetId }?.label ?: "自定义",
             )
             Spacer(Modifier.height(12.dp))
-            InfoRow("版本", "1.3.5")
+            InfoRow("版本", "1.3.6")
         }
 
         Spacer(Modifier.height(120.dp))
