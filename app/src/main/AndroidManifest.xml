@@ -1,16 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 保持前台播放时屏幕/音频策略稳定 -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- 单声道开关写的是系统 Settings（master_mono），需要用户手动授权 -->
-    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
-    <!-- 在全局混音会话上挂音效：部分厂商 ROM 会校验该权限 -->
-    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-
-    <!-- 不申请 RECORD_AUDIO：本应用只做输出增强，不捕获麦克风 -->
+    <!--
+        本应用只支持 ROOT 模式，所有能力都由 uid 0 的守护进程执行，因此一个危险权限都不需要：
+        - 不申请 WRITE_SETTINGS：单声道走 su 的 settings put system master_mono
+        - 不申请 MODIFY_AUDIO_SETTINGS：音效在 root 进程里创建，不经过本进程
+        - 不申请 FOREGROUND_SERVICE / POST_NOTIFICATIONS：没有常驻通知
+        - 不申请 RECORD_AUDIO：纯输出侧处理，不捕获任何音频
+    -->
 
     <application
         android:name=".VolumeBoostApp"
@@ -29,11 +26,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <service
-            android:name=".service.BoostForegroundService"
-            android:exported="false"
-            android:foregroundServiceType="mediaPlayback" />
 
     </application>
 

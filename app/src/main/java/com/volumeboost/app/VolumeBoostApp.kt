@@ -21,7 +21,7 @@ class VolumeBoostApp : Application() {
         engine.attachRootClient(RootDaemonClient(this))
 
         // 预热 su 探测：用户第一次打开 App 时就弹授权框，
-        // 这样点「增强开关」时能立刻走 ROOT 模式，而不是先失败一次再降级。
+        // 这样点「增强开关」时能立刻拉起守护进程，而不是先等一次授权。
         appScope.launch {
             RootShell.resolve()
             // 守护进程可能在上一次进程被杀后仍在运行，接管它，避免状态不一致

@@ -45,7 +45,7 @@ data class RootState(
  * 1. **硬件增益**：通过 tinymix 直接抬高 codec 的 RX / Speaker 数字音量，
  *    这是唯一能突破「数字信号已到 0 dBFS」这条天花板的手段。
  * 2. **释放全局音效通道**：禁用厂商音效服务（杜比 / 小米音效），
- *    让本应用的 LoudnessEnhancer 能重新挂到 session 0。
+ *    避免它们和本应用的音效抢 session 0 的音效槽位。
  * 3. **系统单声道**：`settings put system master_mono`，不需要「修改系统设置」权限。
  */
 class RootAudioManager private constructor(private val context: Context) {
@@ -336,7 +336,7 @@ class RootAudioManager private constructor(private val context: Context) {
      * 禁用 / 恢复厂商音效服务。
      *
      * 厂商音效（杜比全景声、小米音效）会独占全局混音链路的音效槽位，
-     * 导致第三方 App 的 LoudnessEnhancer 创建被拒。禁用后重启 audioserver 让链路重建。
+     * 和本应用的全局音效互相抢占。禁用后重启 audioserver 让链路重建。
      */
     suspend fun setVendorBlocked(blocked: Boolean): Boolean = withContext(Dispatchers.IO) {
         val packages = _state.value.vendorPackages

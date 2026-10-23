@@ -1,15 +1,8 @@
 package com.volumeboost.app.ui
 
-import android.Manifest
-import android.content.Intent
-import android.content.pm.PackageManager
-import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -18,25 +11,21 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 import com.volumeboost.app.audio.AudioEngineProvider
-import com.volumeboost.app.audio.EngineMode
 import com.volumeboost.app.audio.Preset
 import com.volumeboost.app.root.RootAudioManager
-import com.volumeboost.app.root.RootShell
-import com.volumeboost.app.service.BoostForegroundService
 import com.volumeboost.app.ui.theme.VolumeBoostTheme
 import kotlinx.coroutines.launch
 
 /**
  * 单页面 Activity：所有交互集中在一个简洁界面里。
+ *
+ * 本应用只支持 ROOT 模式，没有前台服务、没有常驻通知：
+ * 音效由 uid 0 的守护进程承载，App 退出后声音继续生效。
  */
 class MainActivity : ComponentActivity() {
-
-    private val notificationPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -68,66 +57,35 @@ class MainActivity : ComponentActivity() {
                 val state by engine.state.collectAsState()
                 val rootState by rootManager.state.collectAsState()
                 LaunchedEffect(Unit) { rootManager.refresh() }
-                // ROOT 模式下音效由 uid 0 的守护进程承载，前台服务与通知都是多余的。
-                // 无论是同步切换还是异步探测后升级到 ROOT，这里统一把通知收掉。
-                LaunchedEffect(state.mode) {
-                    if (state.mode == EngineMode.ROOT) {
-                        BoostForegroundService.disable(applicationContext)
-                    }
-                }
                 VolumeBoostApp(
                     state = state,
                     initialPresetId = lastPreset,
                     onToggle = { enable, presetId ->
                         prefs.edit().putString("preset", presetId).apply()
-                        val appContext = applicationContext
                         if (enable) {
                             val preset = Preset.All.firstOrNull { it.id == presetId } ?: Preset.Default
-                            if (RootShell.cachedSu != null) {
-                                // ROOT 模式：守护进程独立运行，不需要前台服务，也不发通知
-                                engine.enable(preset)
-                                BoostForegroundService.disable(appContext)
-                            } else {
-                                maybeRequestNotificationPermission()
-                                BoostForegroundService.enable(appContext, presetId)
-                            }
+                            engine.enable(preset)
                         } else {
                             engine.disable()
-                            BoostForegroundService.disable(appContext)
-                            BoostForegroundService.cancelNotification(appContext)
                         }
                     },
                     onPresetSelected = { preset ->
-                        val wasActive = engine.state.value.active
                         engine.applyPreset(preset)
                         prefs.edit().putString("preset", preset.id).apply()
-                        // 关闭状态下点预设会自动开启效果；只有非 ROOT 模式才需要前台服务
-                        if (!wasActive && engine.state.value.active &&
-                            engine.state.value.mode != EngineMode.ROOT
-                        ) {
-                            maybeRequestNotificationPermission()
-                            BoostForegroundService.enable(applicationContext, preset.id)
-                        }
                     },
                     onBoostChange = { engine.setBoost(it) },
                     onEqBandChange = { band, db -> engine.setEqBand(band, db) },
                     onBassChange = { engine.setBassBoost(it) },
                     onVirtualizerChange = { engine.setVirtualizer(it) },
                     onMonoChange = { enabled ->
-                        if (rootManager.state.value.available) {
-                            // 有 ROOT 时直接写系统设置，不需要「修改系统设置」权限
-                            lifecycleScope.launch {
-                                if (rootManager.setMono(enabled)) engine.syncMono(enabled)
+                        // 单声道只走 ROOT（settings put system master_mono），
+                        // 普通 App 写系统设置需要用户在设置里手动授权，这里不再提供那条路。
+                        lifecycleScope.launch {
+                            if (rootManager.setMono(enabled)) {
+                                engine.syncMono(enabled)
+                            } else {
+                                engine.syncMono(!enabled)
                             }
-                        } else if (Settings.System.canWrite(this)) {
-                            engine.setMono(enabled)
-                        } else {
-                            startActivity(
-                                Intent(
-                                    Settings.ACTION_MANAGE_WRITE_SETTINGS,
-                                    Uri.parse("package:$packageName"),
-                                )
-                            )
                         }
                     },
                     themeMode = themeMode,
@@ -153,14 +111,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         AudioEngineProvider.get(this).refreshRoute()
-    }
-
-    private fun maybeRequestNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val granted = ContextCompat.checkSelfPermission(
-                this, Manifest.permission.POST_NOTIFICATIONS
-            ) == PackageManager.PERMISSION_GRANTED
-            if (!granted) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
+        // 回到前台时顺带刷新一次 ROOT 状态：用户可能刚注入完临时 ROOT
+        lifecycleScope.launch { RootAudioManager.get(this@MainActivity).refresh() }
     }
 }

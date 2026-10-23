@@ -5,7 +5,7 @@ import android.content.Context
 /**
  * AudioEngine 单例提供者。
  *
- * 由于 AudioEngine 构造需要 Context，而前台服务与 UI 都需要访问同一个实例，
+ * 由于 AudioEngine 构造需要 Context，而 UI 与守护进程客户端都要访问同一个实例，
  * 所以用一个全局单例持有它。
  */
 object AudioEngineProvider {

@@ -409,7 +409,7 @@ private fun HomePage(
             subtitle = when {
                 state.routedToBluetooth -> "已连接蓝牙输出"
                 root.available -> "ROOT 已授权 · 硬件增益可用"
-                else -> "全局音频增益"
+                else -> "需要 ROOT 才能开启"
             },
         )
         Spacer(Modifier.height(20.dp))
@@ -483,8 +483,8 @@ private fun HomePage(
             }
         }
 
-        // 错误 / 不支持提示
-        val message = state.error ?: if (state.active && !state.supported) "当前设备不支持系统级音效，功能可能受限" else null
+        // 错误提示
+        val message = state.error
         if (message != null) {
             Spacer(Modifier.height(12.dp))
             PaddedGlassCard(
@@ -642,7 +642,6 @@ private fun ActiveInfoRow(state: AudioState, preset: Preset, hwGainDb: Int = 0) 
     val chips = buildList {
         if (hwGainDb > 0) add("硬件 +${hwGainDb}dB")
         if (state.mode == EngineMode.ROOT) add("ROOT 全局音效")
-        if (state.mode == EngineMode.EQ_BOOST) add("均衡器提升")
         add("低音 ${state.bassBoostStrength / 10}%")
         if (state.limiterActive) add("限幅保护")
         if (state.virtualizerStrength > 0) add("环绕 ${state.virtualizerStrength / 10}%")
@@ -798,7 +797,7 @@ private fun EqPage(
         PageHeader(
             title = "均衡器",
             subtitle = if (state.eqBandCount > 0)
-                "${state.eqBandCount} 段硬件均衡器 · 调节范围 ±6 dB"
+                "${state.eqBandCount} 段均衡器 · 调节范围 ±6 dB"
             else "开启后读取设备真实频段",
         )
         Spacer(Modifier.height(20.dp))
@@ -810,7 +809,7 @@ private fun EqPage(
         ) {
             if (state.eqCenterFreqs.isEmpty()) {
                 Text(
-                    text = "开启增强后，这里会显示本机真实的均衡频段（由系统返回，不是写死的）",
+                    text = "开启增强后，这里会显示 10 段均衡频段（由 ROOT 守护进程在全局混音上建立）",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -832,8 +831,7 @@ private fun EqPage(
                         value = level.toFloat(),
                         onValueChange = { onEqBandChange(index, it.toInt()) },
                         valueRange = -600f..600f,
-                        enabled = state.active &&
-                            (state.mode == EngineMode.FULL || state.mode == EngineMode.ROOT),
+                        enabled = state.active,
                         colors = SliderDefaults.colors(
                             thumbColor = MaterialTheme.colorScheme.primary,
                             activeTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
@@ -869,8 +867,7 @@ private fun EqPage(
                 value = state.bassBoostStrength.toFloat(),
                 range = 0f..1000f,
                 display = "%d%%".format(state.bassBoostStrength / 10),
-                enabled = state.active &&
-                    (state.mode == EngineMode.FULL || state.mode == EngineMode.ROOT),
+                enabled = state.active,
                 onChange = { onBassChange(it.toInt()) },
             )
             Spacer(Modifier.height(4.dp))
@@ -942,7 +939,7 @@ private fun SettingsPage(
                         fontWeight = FontWeight.Medium,
                     )
                     Text(
-                        text = "系统级开关，与「无障碍 → 单声道音频」同步，需要「修改系统设置」权限",
+                        text = "系统级开关，与「无障碍 → 单声道音频」同步，由 ROOT 直接写入",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1002,7 +999,7 @@ private fun SettingsPage(
                         fontWeight = FontWeight.Medium,
                     )
                     Text(
-                        text = "列出本机注册的全局音效与创建测试结果",
+                        text = "机型、ROOT 状态、守护进程日志与系统音效列表",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1028,7 +1025,7 @@ private fun SettingsPage(
                 Preset.All.firstOrNull { it.id == state.presetId }?.label ?: state.presetId,
             )
             Spacer(Modifier.height(12.dp))
-            InfoRow("版本", "1.0.0")
+            InfoRow("版本", "1.1.0")
         }
 
         Spacer(Modifier.height(120.dp))
@@ -1121,7 +1118,7 @@ private fun RootSection(
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = "ROOT 硬件增强",
+                text = "ROOT 状态",
                 style = MaterialTheme.typography.bodyLarge,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -1223,7 +1220,7 @@ private fun RootSection(
                             fontWeight = FontWeight.Medium,
                         )
                         Text(
-                            text = "禁用杜比 / 小米音效服务，让软件增强链能挂上 session 0（实验性，可恢复）",
+                            text = "禁用杜比 / 小米音效服务，避免它们和本应用抢占全局音效槽位（实验性，可恢复）",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -1320,7 +1317,7 @@ private fun ValueSlider(
 
 private fun previewState() = AudioState(
     active = true,
-    mode = EngineMode.FULL,
+    mode = EngineMode.ROOT,
     boostMillibel = 1200,
     eqLevelsDb = intArrayOf(0, 120, 0, -60, 0, 60, 0, 0, -120, 0),
     eqCenterFreqs = intArrayOf(31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000),

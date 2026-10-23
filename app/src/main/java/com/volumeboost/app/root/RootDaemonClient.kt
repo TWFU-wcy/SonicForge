@@ -97,6 +97,13 @@ class RootDaemonClient(private val context: Context) {
         r.output.lineSequence().any { it.trim().toIntOrNull() != null }
     }
 
+    /** 同步读状态文件（只读 App 自己的文件，不走 su）；供 diagnose() 这类同步上下文使用。 */
+    fun readStatusSync(): DaemonStatus? = runCatching {
+        val text = statusFile.readText()
+        if (text.isBlank()) return@runCatching null
+        parseStatus(text)
+    }.getOrNull()
+
     suspend fun readStatus(): DaemonStatus? = withContext(Dispatchers.IO) {
         val direct = runCatching { statusFile.readText() }.getOrNull()
         // 真机上 root 进程创建的文件可能只有 root 可读，退回用 su 读
@@ -106,6 +113,10 @@ class RootDaemonClient(private val context: Context) {
             direct
         }
         if (text.isNullOrBlank()) return@withContext null
+        parseStatus(text)
+    }
+
+    private fun parseStatus(text: String): DaemonStatus {
         var ok = false
         var mode = "NONE"
         var pid = 0
@@ -126,7 +137,7 @@ class RootDaemonClient(private val context: Context) {
                 "ts" -> ts = value.toLongOrNull() ?: 0L
             }
         }
-        DaemonStatus(ok, mode, pid, freqs, error, ts)
+        return DaemonStatus(ok, mode, pid, freqs, error, ts)
     }
 
     /** 读回当前生效的配置（App 自己写的 cmd 文件，重启后靠它恢复界面数值）。 */
