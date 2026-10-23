@@ -43,6 +43,17 @@ object RootDaemon {
     /** 响度均衡用的多段压缩器：低频 / 中频 / 高频三段，各段独立压缩避免低音"抽气"。 */
     private const val MbcBandCount = 3
 
+    /**
+     * 状态文件的协议版本。
+     *
+     * 守护进程是 setsid 脱离 App 的独立 root 进程，装新 APK 并不会杀掉它；
+     * 新版本启动时如果发现它在跑就会直接接管，于是永远跑着旧代码。
+     * 所以状态文件带上版本号，App 发现版本落后就杀掉重拉。
+     *
+     * 只要状态文件里新增/改动了字段，这个数字就要 +1。
+     */
+    private const val ProtocolVersion = 3
+
     /** 三段的分频点（Hz），也是每段的截止频率。 */
     private val MbcCutoffs = floatArrayOf(200f, 2000f, 20000f)
 
@@ -236,6 +247,7 @@ object RootDaemon {
         paused: Boolean,
     ) {
         val text = buildString {
+            appendLine("pv=$ProtocolVersion")
             appendLine("ok=${if (chain.ready) 1 else 0}")
             appendLine("mode=${chain.mode}")
             appendLine("pid=${android.os.Process.myPid()}")

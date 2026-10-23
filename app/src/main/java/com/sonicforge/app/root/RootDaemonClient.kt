@@ -1,6 +1,7 @@
 package com.sonicforge.app.root
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -21,6 +22,8 @@ data class DaemonStatus(
     val route: String = "",
     /** 是否因为输出到耳机/蓝牙而暂停了全部处理。 */
     val paused: Boolean = false,
+    /** 守护进程写这份状态时用的协议版本；0 表示老版本（没有这个字段）。 */
+    val protocolVersion: Int = 0,
 ) {
     /**
      * 心跳在 8 秒内视为存活。
@@ -132,8 +135,15 @@ class RootDaemonClient(private val context: Context) {
 
     /** 拉起守护进程；已在运行则直接返回 true。 */
     suspend fun start(): Boolean = withContext(Dispatchers.IO) {
-        if (isRunning()) return@withContext true
-
+        if (isRunning()) {
+            // 版本对得上就直接接管；对不上说明跑着的是装新 APK 之前拉起的旧进程，
+            // 先杀掉再重新拉，否则新代码永远不会生效。
+            val status = readStatus()
+            if (status != null && status.protocolVersion >= DAEMON_PROTOCOL_VERSION) {
+                return@withContext true
+            }
+            killStale()
+        }
         // 清掉上一次的状态，避免把旧结果当成本次启动成功
         runCatching { statusFile.delete() }
         // 日志文件先建好并放开读权限：守护进程以 root 运行，App 需要能读回日志
@@ -170,6 +180,34 @@ class RootDaemonClient(private val context: Context) {
         runCatching { statusFile.delete() }
     }
 
+    /**
+     * 杀掉版本落后的守护进程。
+     *
+     * 不走 `stop()`：那条路会先把 cmd 文件覆盖成只有 `active=0`，
+     * 把增益/均衡配置全丢了，这里要保住配置只换进程。
+     */
+    private suspend fun killStale() {
+        RootShell.exec("pkill -f '$PROCESS_PATTERN'", 6_000L)
+        runCatching { statusFile.delete() }
+        delay(400)
+    }
+
+    /**
+     * 如果正在跑（或残留）的守护进程状态是旧版本写的，把它清掉。
+     *
+     * 供 App 启动时调用：否则会接管一个旧进程，界面显示的是旧代码写出来的状态
+     * （比如没有 route= / mbc= 两行，就被当成「耳机状态未知、响度均衡不可用」）。
+     *
+     * @return true 表示确实清掉了旧状态。
+     */
+    suspend fun retireIfStale(): Boolean = withContext(Dispatchers.IO) {
+        val status = readStatus() ?: return@withContext false
+        if (status.protocolVersion >= DAEMON_PROTOCOL_VERSION) return@withContext false
+        Log.i(TAG, "发现旧版本守护进程状态 pv=${status.protocolVersion}，清理并准备重拉")
+        killStale()
+        true
+    }
+
     suspend fun isRunning(): Boolean = withContext(Dispatchers.IO) {
         val r = RootShell.exec("pgrep -f '$PROCESS_PATTERN'", 5_000L)
         r.output.lineSequence().any { it.trim().toIntOrNull() != null }
@@ -204,6 +242,7 @@ class RootDaemonClient(private val context: Context) {
         var mbc = false
         var route = ""
         var paused = false
+        var protocolVersion = 0
         text.lineSequence().forEach { line ->
             val idx = line.indexOf('=')
             if (idx <= 0) return@forEach
@@ -217,11 +256,12 @@ class RootDaemonClient(private val context: Context) {
                 "mbc" -> mbc = value == "1"
                 "route" -> route = value
                 "paused" -> paused = value == "1"
+                "pv" -> protocolVersion = value.toIntOrNull() ?: 0
                 "error" -> error = value.ifBlank { null }
                 "ts" -> ts = value.toLongOrNull() ?: 0L
             }
         }
-        return DaemonStatus(ok, mode, pid, freqs, error, ts, mbc, route, paused)
+        return DaemonStatus(ok, mode, pid, freqs, error, ts, mbc, route, paused, protocolVersion)
     }
 
     /** 读回当前生效的配置（App 自己写的 cmd 文件，重启后靠它恢复界面数值）。 */
@@ -257,7 +297,17 @@ class RootDaemonClient(private val context: Context) {
     }.getOrDefault("")
 
     companion object {
+        private const val TAG = "RootDaemonClient"
+
         const val DAEMON_CLASS = "com.sonicforge.app.daemon.RootDaemon"
+
+        /**
+         * App 期望的状态文件协议版本，必须与 `RootDaemon.ProtocolVersion` 保持一致。
+         *
+         * 守护进程状态文件里新增字段时，两个数字一起 +1，
+         * 这样老进程会被自动杀掉重拉，不会再出现「新 APK 跑旧代码」。
+         */
+        const val DAEMON_PROTOCOL_VERSION = 3
 
         /** 音效链那几行的 key。 */
         private val EffectKeys = setOf("active", "boost", "boost_min", "eq", "bass", "leveler")

@@ -21,8 +21,8 @@ android {
         applicationId = "com.sonicforge.app"
         minSdk = 28
         targetSdk = 35
-        versionCode = 12
-        versionName = "1.3.4"
+        versionCode = 13
+        versionName = "1.3.5"
     }
 
     signingConfigs {

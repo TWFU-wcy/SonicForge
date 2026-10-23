@@ -382,8 +382,13 @@ private fun GlassDock(
                 darkScale = 0.90f,
                 darkTint = Color(0xFF12151D),
             )
-            .padding(horizontal = 14.dp, vertical = 7.dp),
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
+            // 上下左右留白必须等宽（都是 8dp）：
+            // 格高 52dp、胶囊高 40dp 居中 → 胶囊自己上下还留 6dp；
+            // 所以这里垂直只加 2dp，2 + 6 = 8dp，与水平方向的 8dp 完全对齐。
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+        // 三格等宽、胶囊与格同宽：三个色块（选中的实心、未选中的透明）宽度完全一致，
+        // 相邻间隔和两端留白都正好是 8dp，视觉节奏完全均匀。
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Tab.entries.forEach { item ->
@@ -431,7 +436,7 @@ private fun DockItem(tab: Tab, selected: Boolean, onClick: () -> Unit) {
 
     Box(
         modifier = Modifier
-            .size(width = 68.dp, height = 52.dp)
+            .size(width = 52.dp, height = 52.dp)
             .clickable(
                 interactionSource = interaction,
                 indication = null,
@@ -441,12 +446,12 @@ private fun DockItem(tab: Tab, selected: Boolean, onClick: () -> Unit) {
     ) {
         Box(
             modifier = Modifier
-                .size(width = 52.dp, height = 42.dp)
+                .size(width = 52.dp, height = 40.dp)
                 .graphicsLayer {
                     scaleX = pressScale
                     scaleY = pressScale
                 }
-                .clip(RoundedCornerShape(18.dp))
+                .clip(RoundedCornerShape(16.dp))
                 .background(pill),
             contentAlignment = Alignment.Center,
         ) {
@@ -508,18 +513,28 @@ private fun HomePage(
                         active = state.active && !state.pausedForHeadset,
                     )
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = if (state.active && !state.pausedForHeadset) "+${state.gainPercent}" else "0",
-                            fontSize = 46.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = if (state.active && !state.pausedForHeadset) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Text(
-                            text = "% 响度",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                        // 数字和百分号排在同一基线上，视觉上是一个整体「+33%」，
+                        // 百分号用更小字号，避免和数字抢注意力。
+                        Row(
+                            verticalAlignment = Alignment.Bottom,
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
+                            Text(
+                                text = if (state.active && !state.pausedForHeadset) "+${state.gainPercent}" else "0",
+                                fontSize = 46.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (state.active && !state.pausedForHeadset) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                text = "%",
+                                fontSize = 24.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (state.active && !state.pausedForHeadset) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(bottom = 8.dp, start = 2.dp),
+                            )
+                        }
                         if (state.active && !state.pausedForHeadset) {
                             Spacer(Modifier.height(4.dp))
                             Text(
@@ -1248,7 +1263,7 @@ private fun SettingsPage(
                 Preset.All.firstOrNull { it.id == state.presetId }?.label ?: "自定义",
             )
             Spacer(Modifier.height(12.dp))
-            InfoRow("版本", "1.3.4")
+            InfoRow("版本", "1.3.5")
         }
 
         Spacer(Modifier.height(120.dp))
