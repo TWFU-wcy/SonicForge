@@ -1,15 +1,15 @@
-package com.volumeboost.app
+package com.sonicforge.app
 
 import android.app.Application
-import com.volumeboost.app.audio.AudioEngineProvider
-import com.volumeboost.app.root.RootDaemonClient
-import com.volumeboost.app.root.RootShell
+import com.sonicforge.app.audio.AudioEngineProvider
+import com.sonicforge.app.root.RootDaemonClient
+import com.sonicforge.app.root.RootShell
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
-class VolumeBoostApp : Application() {
+class SonicForgeApp : Application() {
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 

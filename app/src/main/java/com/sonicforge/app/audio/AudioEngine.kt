@@ -1,4 +1,4 @@
-package com.volumeboost.app.audio
+package com.sonicforge.app.audio
 
 import android.content.Context
 import android.media.AudioDeviceInfo
@@ -7,8 +7,8 @@ import android.media.audiofx.AudioEffect
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
-import com.volumeboost.app.root.RootDaemonClient
-import com.volumeboost.app.root.RootShell
+import com.sonicforge.app.root.RootDaemonClient
+import com.sonicforge.app.root.RootShell
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -73,9 +73,9 @@ data class AudioState(
 /**
  * 音频引擎（ROOT 版）。
  *
- * 所有效果都不在本进程创建，而是交给 uid 0 的 [com.volumeboost.app.daemon.RootDaemon]：
+ * 所有效果都不在本进程创建，而是交给 uid 0 的 [com.sonicforge.app.daemon.RootDaemon]：
  *
- *     su -c "CLASSPATH=<apk> app_process /system/bin com.volumeboost.app.daemon.RootDaemon <cmd> <status>"
+ *     su -c "CLASSPATH=<apk> app_process /system/bin com.sonicforge.app.daemon.RootDaemon <cmd> <status>"
  *
  * 守护进程里建一条 [android.media.audiofx.DynamicsProcessing]：
  *

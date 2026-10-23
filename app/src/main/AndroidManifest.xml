@@ -10,17 +10,17 @@
     -->
 
     <application
-        android:name=".VolumeBoostApp"
+        android:name=".SonicForgeApp"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@style/Theme.VolumeBoost">
+        android:theme="@style/Theme.SonicForge">
 
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
-            android:theme="@style/Theme.VolumeBoost">
+            android:theme="@style/Theme.SonicForge">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

@@ -1,4 +1,4 @@
-package com.volumeboost.app.audio
+package com.sonicforge.app.audio
 
 import android.content.Context
 

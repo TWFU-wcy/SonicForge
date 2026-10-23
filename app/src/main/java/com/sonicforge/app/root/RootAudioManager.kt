@@ -1,4 +1,4 @@
-package com.volumeboost.app.root
+package com.sonicforge.app.root
 
 import android.content.Context
 import kotlinx.coroutines.Dispatchers

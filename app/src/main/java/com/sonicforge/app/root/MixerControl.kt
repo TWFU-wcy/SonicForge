@@ -1,4 +1,4 @@
-package com.volumeboost.app.root
+package com.sonicforge.app.root
 
 /**
  * 一条 ALSA 混音器控制项（tinymix 输出的一行）。

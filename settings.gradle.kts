@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "VolumeBoost"
+rootProject.name = "SonicForge"
 include(":app")

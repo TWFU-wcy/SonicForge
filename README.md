@@ -1,6 +1,8 @@
-# 音量增强 VolumeBoost
+# SonicForge
 
-解决手机（尤其小米 HyperOS）外放 / 媒体声音过小的问题。
+**SonicForge** = Sonic（声音）+ Forge（锻造）。它不只是把声音「调大」，而是在系统音频链路上重新锻造一整套输出：全局增益、十段均衡、低音补偿、限幅防削波、硬件级 codec 增益、系统单声道。
+
+解决手机（尤其小米 HyperOS）外放 / 媒体声音过小、推不动、一推就破音的问题。
 
 > **只支持 ROOT。** 普通 App 在 `audioSession = 0` 创建全局音效会被 AudioFlinger 以缺少 `MODIFY_AUDIO_ROUTING` 拒绝，HyperOS 上还有杜比 / 小米音效抢占 session 0 的链路 —— 免 ROOT 的路在真机上根本走不通。所以本应用把整条效果链搬进 **uid 0 的守护进程**，没有普通模式，也没有降级模式。
 
@@ -27,7 +29,7 @@
 - 🎸 **低音补偿**：叠加在最低几个频段上（≤62Hz 权重 1.0，逐级衰减到 500Hz），同样受限幅器保护
 - 🎧 **虚拟环绕**：仅在插入耳机 / 蓝牙时可用，扬声器下自动置灰
 - 🎙️ **单声道**：直接写系统 `master_mono`（等同于「无障碍 → 单声道音频」），ROOT 下无需任何授权
-- 🎼 **4 个预设**：标准增强 +10dB / 人声增强 +12dB / 外放最大 +16dB / 夜间清晰 +8dB
+- 🎼 **4 个预设**：标准增强 +8dB / 人声增强 +9.6dB / 外放最大 +12.8dB / 夜间清晰 +6.4dB（逐级递进，默认档更克制）
 - 🔓 **硬件增益**：`tinymix` 直接抬高 codec 的数字音量（最高 +12 dB）。同一通路上串联的两级衰减器只写一级，滑杆刻度就是真实增益；以首次应用前的原始值为基准，可一键恢复
 - 🔒 **偏移守护**：守护进程每 1.2 秒核对一次 codec 音量，系统音量一变就以新值为基准重新补上偏移——调系统音量依然有效，但增强不会掉
 - 🔓 **释放全局音效通道**：临时禁用杜比 / 小米音效包并重启 audioserver，避免它们和本应用抢 session 0 的音效槽位
@@ -54,7 +56,7 @@
 # 产物：app/build/outputs/apk/debug/app-debug.apk
 ```
 
-> **release 构建必须保留 `proguard-rules.pro` 里的 `-keep class com.volumeboost.app.daemon.RootDaemon`。** 守护进程由 `app_process` 按类名反射启动，R8 看不到这个引用，去掉 keep 规则会把类删掉，release 包装上后开开关会直接失败。
+> **release 构建必须保留 `proguard-rules.pro` 里的 `-keep class com.sonicforge.app.daemon.RootDaemon`。** 守护进程由 `app_process` 按类名反射启动，R8 看不到这个引用，去掉 keep 规则会把类删掉，release 包装上后开开关会直接失败。
 
 ## 安装与使用
 
@@ -66,7 +68,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 2. 打开 App，首次会弹 su 授权框，点「允许」
 3. 选一个预设（推荐先用「标准增强」），打开「增强开关」
 4. 播放任意音乐 / 视频，拖动「主音量增益」到合适位置
-5. 想更响：设置页 →「ROOT 硬件增强」→ 拖「硬件增益」（最多 +12 dB）
+5. 想更响：设置页 →「ROOT 状态」→ 拖「硬件增益」（最多 +12 dB）
 6. 关闭开关即完全恢复原声；点「恢复原始值」把 codec 音量写回
 
 > 临时 ROOT **重启即失效**。重启后重新注入 ROOT，再打开 App 点设置页的「重新检测」即可。
@@ -82,15 +84,15 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ### 守护进程
 
-- **位置**：`com.volumeboost.app.daemon.RootDaemon`，通过 `app_process` 以 uid 0 启动
-- **启动命令**：`CLASSPATH=<apk> nohup setsid app_process /system/bin com.volumeboost.app.daemon.RootDaemon <cmd> <status> >> <log> 2>&1 &`
-- **通信**：文件轮询，App 写 `files/vb_daemon.cmd`，守护进程每 250 ms 读一次，状态写 `files/vb_daemon.status`；音效参数（`active/boost/eq/bass/virt`）与硬件音量守护参数（`mixer_*`）分行存放，两边互不覆盖
+- **位置**：`com.sonicforge.app.daemon.RootDaemon`，通过 `app_process` 以 uid 0 启动
+- **启动命令**：`CLASSPATH=<apk> nohup setsid app_process /system/bin com.sonicforge.app.daemon.RootDaemon <cmd> <status> >> <log> 2>&1 &`
+- **通信**：文件轮询，App 写 `files/sf_daemon.cmd`，守护进程每 250 ms 读一次，状态写 `files/sf_daemon.status`；音效参数（`active/boost/eq/bass/virt`）与硬件音量守护参数（`mixer_*`）分行存放，两边互不覆盖
 - **硬件音量守护**：`mixer_offset` 是相对用户音量的偏移档位（0.5 dB/档），`mixer_names` 是 `名字|基准值|最小|最大` 的列表；守护进程每 1.2 秒核一次，只在值被别人改动时补写，不会每轮都写寄存器
 - **心跳**：每 2 秒刷新一次状态文件的 `ts`；App 启动时读心跳，若发现它还在跑就自动接管界面状态（不会出现「显示已关闭但声音还在增强」）
 - **生命周期**：关闭开关写 `active=0`，守护进程自行释放音效并退出；配置文件被删除超过 5 秒也会自动退出
 - **后台常驻**：用 `setsid` 脱离 App 会话，并把 `oom_score_adj` 调到 `-900`，App 退出 / 被划掉后仍继续工作；**因此不需要前台服务，也不显示常驻通知**
 - **仍会失效的两种情况**：手动杀掉守护进程；手机重启（临时 ROOT 本身失效）
-- **日志**：`files/vb_daemon.log`，也可在设置页「音效诊断」里查看尾部
+- **日志**：`files/sf_daemon.log`，也可在设置页「音效诊断」里查看尾部
 
 ## 原理与限制
 
@@ -110,8 +112,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 **主页显示「需要 ROOT 才能开启」**
 `su` 没拿到。确认临时 ROOT 已注入，打开 App 后点设置页「重新检测」；KernelSU 里也要允许本应用。
 
-**设置页显示「未检测到 ROOT：su 不可用」**
-同上。可先到 KernelSU 管理器的「超级用户」列表里手动授予 `com.volumeboost.app`。
+**设置页显示「需要 ROOT 权限才能工作」**
+同上。可先到 KernelSU 管理器的「超级用户」列表里手动授予 `com.sonicforge.app`。
 
 **开关能打开，但没声音变化**
 到设置页点「音效诊断」，看 `【ROOT 守护进程】` 段：`mode=FULL` 表示链路正常；`mode=DEGRADED` 表示只挂上了 LoudnessEnhancer；`error` 行会写明失败原因。把这段文本贴到 issue 里即可定位。
@@ -128,8 +130,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ## 工程结构
 
 ```
-app/src/main/java/com/volumeboost/app/
-├── VolumeBoostApp.kt              # Application，预初始化引擎并注入 ROOT 客户端
+app/src/main/java/com/sonicforge/app/
+├── SonicForgeApp.kt              # Application，预初始化引擎并注入 ROOT 客户端
 ├── audio/
 │   ├── AudioEngine.kt             # 效果链状态机（OFF / ROOT / UNSUPPORTED）
 │   ├── AudioEngineProvider.kt     # 引擎单例

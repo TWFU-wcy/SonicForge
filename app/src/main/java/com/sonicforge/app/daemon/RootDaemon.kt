@@ -1,4 +1,4 @@
-package com.volumeboost.app.daemon
+package com.sonicforge.app.daemon
 
 import android.media.audiofx.AudioEffect
 import android.media.audiofx.DynamicsProcessing
@@ -41,8 +41,8 @@ object RootDaemon {
 
     @JvmStatic
     fun main(args: Array<String>) {
-        val cmdFile = File(args.getOrElse(0) { "/data/local/tmp/volumeboost.cmd" })
-        val statusFile = File(args.getOrElse(1) { "/data/local/tmp/volumeboost.status" })
+        val cmdFile = File(args.getOrElse(0) { "/data/local/tmp/sonicforge.cmd" })
+        val statusFile = File(args.getOrElse(1) { "/data/local/tmp/sonicforge.status" })
 
         Log.i(TAG, "守护进程启动 uid=${android.os.Process.myUid()} pid=${android.os.Process.myPid()}")
 

@@ -14,15 +14,15 @@ if (keystorePropsFile.exists()) {
 }
 
 android {
-    namespace = "com.volumeboost.app"
+    namespace = "com.sonicforge.app"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.volumeboost.app"
+        applicationId = "com.sonicforge.app"
         minSdk = 28
         targetSdk = 35
-        versionCode = 6
-        versionName = "1.1.4"
+        versionCode = 7
+        versionName = "1.2.0"
     }
 
     signingConfigs {

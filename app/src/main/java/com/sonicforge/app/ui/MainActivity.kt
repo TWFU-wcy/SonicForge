@@ -1,4 +1,4 @@
-package com.volumeboost.app.ui
+package com.sonicforge.app.ui
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -13,10 +13,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
-import com.volumeboost.app.audio.AudioEngineProvider
-import com.volumeboost.app.audio.Preset
-import com.volumeboost.app.root.RootAudioManager
-import com.volumeboost.app.ui.theme.VolumeBoostTheme
+import com.sonicforge.app.audio.AudioEngineProvider
+import com.sonicforge.app.audio.Preset
+import com.sonicforge.app.root.RootAudioManager
+import com.sonicforge.app.ui.theme.SonicForgeTheme
 import kotlinx.coroutines.launch
 
 /**
@@ -33,7 +33,7 @@ class MainActivity : ComponentActivity() {
         val engine = AudioEngineProvider.get(this)
         val rootManager = RootAudioManager.get(this)
         // 恢复上次状态（预设仅作默认选中，效果需用户显式开启）
-        val prefs = getSharedPreferences("volume_boost", MODE_PRIVATE)
+        val prefs = getSharedPreferences("sonicforge", MODE_PRIVATE)
         val lastPreset = prefs.getString("preset", null)
 
         setContent {
@@ -46,7 +46,7 @@ class MainActivity : ComponentActivity() {
                 "dark" -> true
                 else -> isSystemInDarkTheme()
             }
-            VolumeBoostTheme(darkTheme = darkTheme) {
+            SonicForgeTheme(darkTheme = darkTheme) {
                 // 浅色主题下把状态栏/导航栏图标切成深色，否则白图标在浅背景上看不清
                 SideEffect {
                     WindowCompat.getInsetsController(window, window.decorView).apply {
@@ -57,7 +57,7 @@ class MainActivity : ComponentActivity() {
                 val state by engine.state.collectAsState()
                 val rootState by rootManager.state.collectAsState()
                 LaunchedEffect(Unit) { rootManager.refresh() }
-                VolumeBoostApp(
+                SonicForgeApp(
                     state = state,
                     initialPresetId = lastPreset,
                     onToggle = { enable, presetId ->

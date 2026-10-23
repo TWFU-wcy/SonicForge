@@ -1,4 +1,4 @@
-package com.volumeboost.app.ui
+package com.sonicforge.app.ui
 
 import android.content.res.Configuration
 import android.os.Build
@@ -82,8 +82,8 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.scale
-import com.volumeboost.app.root.RootAudioManager
-import com.volumeboost.app.root.RootState
+import com.sonicforge.app.root.RootAudioManager
+import com.sonicforge.app.root.RootState
 import kotlin.math.roundToInt
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.layer.GraphicsLayer
@@ -105,10 +105,10 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.tooling.preview.Preview
-import com.volumeboost.app.audio.AudioState
-import com.volumeboost.app.audio.EngineMode
-import com.volumeboost.app.audio.Preset
-import com.volumeboost.app.ui.theme.VolumeBoostTheme
+import com.sonicforge.app.audio.AudioState
+import com.sonicforge.app.audio.EngineMode
+import com.sonicforge.app.audio.Preset
+import com.sonicforge.app.ui.theme.SonicForgeTheme
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -224,7 +224,7 @@ private fun AppBackground() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
-fun VolumeBoostApp(
+fun SonicForgeApp(
     state: AudioState,
     initialPresetId: String?,
     onToggle: (Boolean, String) -> Unit,
@@ -476,7 +476,7 @@ private fun HomePage(
     ) {
         Spacer(Modifier.height(12.dp))
         PageHeader(
-            title = "音量增强",
+            title = "SonicForge",
             subtitle = when {
                 state.routedToBluetooth -> "已连接蓝牙输出"
                 root.available -> "ROOT 已授权 · 硬件增益可用"
@@ -654,8 +654,8 @@ private fun PresetRow(
             ) {
                 Icon(
                     imageVector = when {
-                        item.boostMillibel >= 1500 -> Icons.Filled.Speaker
-                        item.boostMillibel >= 1400 -> Icons.Filled.GraphicEq
+                        item.boostMillibel >= 1200 -> Icons.Filled.Speaker
+                        item.boostMillibel >= 900 -> Icons.Filled.GraphicEq
                         else -> Icons.Filled.Headphones
                     },
                     contentDescription = null,
@@ -1093,10 +1093,10 @@ private fun SettingsPage(
             Spacer(Modifier.height(12.dp))
             InfoRow(
                 "当前预设",
-                Preset.All.firstOrNull { it.id == state.presetId }?.label ?: state.presetId,
+                Preset.All.firstOrNull { it.id == state.presetId }?.label ?: "自定义",
             )
             Spacer(Modifier.height(12.dp))
-            InfoRow("版本", "1.1.4")
+            InfoRow("版本", "1.2.0")
         }
 
         Spacer(Modifier.height(120.dp))
@@ -1228,7 +1228,7 @@ private fun RootSection(
 
         if (!root.available) {
             Text(
-                text = root.error ?: "临时 ROOT 每次重启都会失效，重新注入后点「重新检测」。",
+                text = "需要 ROOT 权限才能工作。临时 ROOT 重启后会失效，重新注入后点「重新检测」。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1261,14 +1261,11 @@ private fun RootSection(
                     steps = RootAudioManager.MaxGainDb - 1,
                 )
                 Text(
-                    text = root.appliedDetail
-                        ?: buildString {
-                            if (root.cardName != null) {
-                                append("声卡 ${root.cardIndex}（${root.cardName}）· ${root.targets.size} 个音量控制\n")
-                            }
-                            append("直接抬高 codec 数字音量，突破数字信号 0 dBFS 的天花板\n")
-                            append("调系统音量会保持这段偏移，增强不会掉")
-                        },
+                    text = if (root.appliedDb > 0) {
+                        "已提升音频芯片的输出电平\n调系统音量时这段增强会保持"
+                    } else {
+                        "直接提升音频芯片的输出电平，突破系统音量上限\n调系统音量时这段增强会保持"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1277,7 +1274,7 @@ private fun RootSection(
                 }
             } else {
                 Text(
-                    text = root.error ?: "未找到 tinymix，无法读写硬件音量",
+                    text = "这台设备没有可调的硬件音量控制，增强开关仍然可用。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1415,8 +1412,8 @@ private fun previewState() = AudioState(
 )
 @Composable
 private fun PreviewHomeDark() {
-    VolumeBoostTheme(darkTheme = true) {
-        VolumeBoostApp(
+    SonicForgeTheme(darkTheme = true) {
+        SonicForgeApp(
             state = previewState(),
             initialPresetId = null,
             onToggle = { _, _ -> },
@@ -1441,8 +1438,8 @@ private fun PreviewHomeDark() {
 )
 @Composable
 private fun PreviewHomeLight() {
-    VolumeBoostTheme(darkTheme = false) {
-        VolumeBoostApp(
+    SonicForgeTheme(darkTheme = false) {
+        SonicForgeApp(
             state = previewState(),
             initialPresetId = null,
             onToggle = { _, _ -> },
@@ -1468,7 +1465,7 @@ private fun PreviewHomeLight() {
 )
 @Composable
 private fun PreviewEqDark() {
-    VolumeBoostTheme(darkTheme = true) {
+    SonicForgeTheme(darkTheme = true) {
         Box(Modifier.fillMaxSize()) {
             AppBackground()
             EqPage(previewState(), { _, _ -> }, {}, {})
@@ -1485,7 +1482,7 @@ private fun PreviewEqDark() {
 )
 @Composable
 private fun PreviewSettingsDark() {
-    VolumeBoostTheme(darkTheme = true) {
+    SonicForgeTheme(darkTheme = true) {
         Box(Modifier.fillMaxSize()) {
             AppBackground()
             SettingsPage(

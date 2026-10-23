@@ -1,4 +1,4 @@
-package com.volumeboost.app.root
+package com.sonicforge.app.root
 
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
@@ -38,9 +38,9 @@ data class DaemonConfigSnapshot(
  */
 class RootDaemonClient(private val context: Context) {
 
-    private val cmdFile = File(context.filesDir, "vb_daemon.cmd")
-    private val statusFile = File(context.filesDir, "vb_daemon.status")
-    private val logFile = File(context.filesDir, "vb_daemon.log")
+    private val cmdFile = File(context.filesDir, "sf_daemon.cmd")
+    private val statusFile = File(context.filesDir, "sf_daemon.status")
+    private val logFile = File(context.filesDir, "sf_daemon.log")
 
     /**
      * 写音效配置。文件很小，直接同步写即可。
@@ -225,7 +225,7 @@ class RootDaemonClient(private val context: Context) {
     }.getOrDefault("")
 
     companion object {
-        const val DAEMON_CLASS = "com.volumeboost.app.daemon.RootDaemon"
+        const val DAEMON_CLASS = "com.sonicforge.app.daemon.RootDaemon"
 
         /** 音效链那几行的 key。 */
         private val EffectKeys = setOf("active", "boost", "eq", "bass", "virt")
@@ -239,6 +239,6 @@ class RootDaemonClient(private val context: Context) {
          * 写成 `Root[D]aemon` 是为了让「执行这条命令的 shell 自己」不被匹配到：
          * shell 的命令行里是字面量 `Root[D]aemon`，而正则只匹配 `RootDaemon`。
          */
-        private const val PROCESS_PATTERN = "com.volumeboost.app.daemon.Root[D]aemon"
+        private const val PROCESS_PATTERN = "com.sonicforge.app.daemon.Root[D]aemon"
     }
 }
