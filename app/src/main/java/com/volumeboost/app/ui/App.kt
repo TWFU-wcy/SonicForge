@@ -2,15 +2,23 @@ package com.volumeboost.app.ui
 
 import android.content.res.Configuration
 import android.os.Build
-import androidx.compose.animation.Crossfade
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -80,6 +88,7 @@ import kotlin.math.roundToInt
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.rememberGraphicsLayer
@@ -244,7 +253,32 @@ fun VolumeBoostApp(
         // 修复深色模式下无显式 color 的 Text 变成纯黑（透明容器导致 contentColor 丢失）
         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onBackground) {
             Box(Modifier.fillMaxSize()) {
-                Crossfade(targetState = tab, label = "page") { current ->
+                AnimatedContent(
+                    targetState = tab,
+                    // Material 3 的「fade through」：旧页先快速淡出（90ms），
+                    // 新页随后淡入并轻微放大（延迟 90ms）。
+                    // 不用左右滑动 —— 两页都是半透明玻璃卡片，滑动时两页文字会同时可见，
+                    // 叠在一起像重影，比生硬的直接切换更难看。
+                    transitionSpec = {
+                        (
+                            fadeIn(
+                                animationSpec = tween(
+                                    durationMillis = 220,
+                                    delayMillis = 90,
+                                    easing = LinearOutSlowInEasing,
+                                )
+                            ) + scaleIn(
+                                initialScale = 0.94f,
+                                animationSpec = tween(
+                                    durationMillis = 220,
+                                    delayMillis = 90,
+                                    easing = LinearOutSlowInEasing,
+                                )
+                            )
+                            ) togetherWith fadeOut(animationSpec = tween(90))
+                    },
+                    label = "page",
+                ) { current ->
                     Box(
                         Modifier
                             .fillMaxSize()
@@ -372,17 +406,40 @@ private fun DockItem(tab: Tab, selected: Boolean, onClick: () -> Unit) {
         MaterialTheme.colorScheme.primary,
         sel,
     )
-    val pill = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f * sel)
+
+    // 按下反馈全部自己画：图标轻微缩小 + 圆角胶囊泛起一点底色。
+    // 关键是把 Material 默认水波纹关掉（indication = null）——水波纹按 68×52 的
+    // 矩形节点裁剪，点下去就是一块方形遮罩，和圆角玻璃完全不是一个语言。
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val press by animateFloatAsState(
+        targetValue = if (pressed) 1f else 0f,
+        animationSpec = tween(
+            durationMillis = if (pressed) 90 else 260,
+            easing = FastOutSlowInEasing,
+        ),
+        label = "dockPress",
+    )
+    val pressScale = 1f - 0.08f * press
+    val pill = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f * sel + 0.09f * press)
 
     Box(
         modifier = Modifier
             .size(width = 68.dp, height = 52.dp)
-            .clickable(onClick = onClick),
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = onClick,
+            ),
         contentAlignment = Alignment.Center,
     ) {
         Box(
             modifier = Modifier
                 .size(width = 52.dp, height = 42.dp)
+                .graphicsLayer {
+                    scaleX = pressScale
+                    scaleY = pressScale
+                }
                 .clip(RoundedCornerShape(18.dp))
                 .background(pill),
             contentAlignment = Alignment.Center,
@@ -1039,7 +1096,7 @@ private fun SettingsPage(
                 Preset.All.firstOrNull { it.id == state.presetId }?.label ?: state.presetId,
             )
             Spacer(Modifier.height(12.dp))
-            InfoRow("版本", "1.1.3")
+            InfoRow("版本", "1.1.4")
         }
 
         Spacer(Modifier.height(120.dp))

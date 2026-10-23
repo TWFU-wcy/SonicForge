@@ -32,6 +32,7 @@
 - 🔒 **偏移守护**：守护进程每 1.2 秒核对一次 codec 音量，系统音量一变就以新值为基准重新补上偏移——调系统音量依然有效，但增强不会掉
 - 🔓 **释放全局音效通道**：临时禁用杜比 / 小米音效包并重启 audioserver，避免它们和本应用抢 session 0 的音效槽位
 - 🌙 **Material 3 明暗主题**、毛玻璃卡片、iOS 风格底部 Dock，单页面简洁 UI
+- ✨ **克制的动效**：页面切换用 fade through（旧页 90 ms 淡出，新页延迟 90 ms 淡入并 0.94→1.0 缩放），Dock 按下是图标微缩 + 胶囊泛色，没有水波纹方块
 - 📵 **零危险权限**：不申请 `RECORD_AUDIO`、`MODIFY_AUDIO_SETTINGS`、`WRITE_SETTINGS`、`FOREGROUND_SERVICE`、`POST_NOTIFICATIONS`
 - 🔕 **无常驻通知**：效果链由守护进程承载，App 可以退出、可以被划掉
 
