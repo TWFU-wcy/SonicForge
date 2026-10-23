@@ -42,16 +42,70 @@ class RootDaemonClient(private val context: Context) {
     private val statusFile = File(context.filesDir, "vb_daemon.status")
     private val logFile = File(context.filesDir, "vb_daemon.log")
 
-    /** 写配置。文件很小，直接同步写即可。 */
+    /**
+     * 写音效配置。文件很小，直接同步写即可。
+     *
+     * 只替换音效那几行，保留 `mixer_*` 行 —— 硬件增益的守护由
+     * [writeMixer] 独立维护，两边互不覆盖。
+     */
     fun writeConfig(active: Boolean, boost: Int, eq: IntArray, bass: Int, virt: Int) {
-        val text = buildString {
-            appendLine("active=${if (active) 1 else 0}")
-            appendLine("boost=$boost")
-            appendLine("eq=${eq.joinToString(",")}")
-            appendLine("bass=$bass")
-            appendLine("virt=$virt")
+        updateLines { lines ->
+            lines.removeAll { keyOf(it) in EffectKeys }
+            lines += "active=${if (active) 1 else 0}"
+            lines += "boost=$boost"
+            lines += "eq=${eq.joinToString(",")}"
+            lines += "bass=$bass"
+            lines += "virt=$virt"
         }
-        runCatching { cmdFile.writeText(text) }
+    }
+
+    /**
+     * 写硬件音量守护配置，交给守护进程维持「系统音量变化后自动补回偏移」。
+     *
+     * 传 `offsetUnits = 0` 或空列表即可关闭守护。
+     */
+    fun writeMixer(
+        tool: String?,
+        card: Int,
+        offsetUnits: Int,
+        targets: List<MixerControl>,
+        bases: Map<String, Int>,
+    ) {
+        updateLines { lines ->
+            lines.removeAll { keyOf(it) in MixerKeys }
+            if (tool != null && offsetUnits > 0 && targets.isNotEmpty()) {
+                lines += "mixer_tool=$tool"
+                lines += "mixer_card=$card"
+                lines += "mixer_offset=$offsetUnits"
+                lines += "mixer_names=" + targets.joinToString(";") { control ->
+                    val base = bases[control.name] ?: control.value ?: 0
+                    "${control.name}|$base|${control.min ?: 0}|${control.max ?: 0}"
+                }
+            }
+        }
+    }
+
+    /** 关闭硬件音量守护。 */
+    fun clearMixer() {
+        updateLines { lines -> lines.removeAll { keyOf(it) in MixerKeys } }
+    }
+
+    private fun keyOf(line: String): String {
+        val idx = line.indexOf('=')
+        return if (idx <= 0) "" else line.substring(0, idx).trim()
+    }
+
+    /** 读—改—写 cmd 文件，保证两边写入不互相抹掉。 */
+    private fun updateLines(transform: (MutableList<String>) -> Unit) {
+        runCatching {
+            val lines = cmdFile.takeIf { it.exists() }
+                ?.readLines()
+                ?.filter { it.isNotBlank() }
+                ?.toMutableList()
+                ?: mutableListOf()
+            transform(lines)
+            cmdFile.writeText(lines.joinToString("\n", postfix = "\n"))
+        }
     }
 
     /** 拉起守护进程；已在运行则直接返回 true。 */
@@ -172,6 +226,12 @@ class RootDaemonClient(private val context: Context) {
 
     companion object {
         const val DAEMON_CLASS = "com.volumeboost.app.daemon.RootDaemon"
+
+        /** 音效链那几行的 key。 */
+        private val EffectKeys = setOf("active", "boost", "eq", "bass", "virt")
+
+        /** 硬件音量守护那几行的 key。 */
+        private val MixerKeys = setOf("mixer_tool", "mixer_card", "mixer_offset", "mixer_names")
 
         /**
          * 用于 pgrep/pkill 的模式。

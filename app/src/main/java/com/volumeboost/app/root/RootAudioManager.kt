@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import kotlin.math.roundToInt
 
 /**
  * ROOT 侧能力的状态快照。
@@ -101,6 +102,9 @@ class RootAudioManager private constructor(private val context: Context) {
     private val _state = MutableStateFlow(RootState())
     val state: StateFlow<RootState> = _state.asStateFlow()
 
+    /** 把「保持偏移」的活儿交给守护进程，见 [applyGain]。 */
+    private val daemonClient = RootDaemonClient(context)
+
     @Volatile
     private var mixerTool: String? = null
 
@@ -146,6 +150,11 @@ class RootAudioManager private constructor(private val context: Context) {
             targets.take(12).forEach { appendLine("   - ${it.describe()}") }
             appendLine("· 系统单声道：${if (mono) "开" else "关"}")
             appendLine("· 厂商音效包：${if (vendor.isEmpty()) "未发现" else vendor.joinToString()}")
+            val gainDb = prefs.getInt("gain_db", 0)
+            appendLine("· 硬件增益：${if (gainDb > 0) "+$gainDb dB（已交给守护进程维持）" else "未启用"}")
+            if (gainDb > 0) {
+                appendLine("· 守护偏移：${gainDb * UnitsPerDb} 档（${gainDb} dB）")
+            }
             if (scanLog.isNotEmpty()) {
                 appendLine()
                 appendLine("声卡扫描：")
@@ -296,7 +305,7 @@ class RootAudioManager private constructor(private val context: Context) {
             .firstOrNull { it.startsWith("/") }
     }
 
-    /** 从所有控制项里挑出「输出音量」。 */
+    /** 从所有控制项里挑出「输出音量」，并且只挑**一级**。 */
     private fun pickTargets(controls: List<MixerControl>): List<MixerControl> {
         val candidates = controls.filter { control ->
             val name = control.name
@@ -312,8 +321,30 @@ class RootAudioManager private constructor(private val context: Context) {
             n.contains("speaker") || n.contains("spk") || n.contains("mono") ||
                 n.contains("wsa") || n.contains("aw8") || n.contains("tas25") || n.contains("cs35")
         }
-        return if (speakerOnly.isNotEmpty()) speakerOnly else candidates
+        val pool = if (speakerOnly.isNotEmpty()) speakerOnly else candidates
+
+        // 同一条通路上串联着多级音量（真机实测：`RX_RX0 Digital Volume` 与
+        // `RX_RX0 Mix Digital Volume` 是串联的两级），两级一起抬会让实际增益
+        // 变成滑杆值的两倍。这里只保留一级：优先不带 Mix 的那一级。
+        val direct = pool.filterNot { it.name.contains("mix", ignoreCase = true) }
+        val stage = if (direct.isNotEmpty()) direct else pool
+
+        // 再按「去掉通道号后的名字」分组，只留通道覆盖最多的那一组，
+        // 避免把 Digital Volume 与 PA Volume 这类不同级的衰减器同时写。
+        val groups = stage.groupBy { stageKey(it.name) }
+        return groups.maxByOrNull { it.value.size }?.value ?: stage
     }
+
+    /**
+     * 把一个控制项名字归一化成「通路阶段」，用于识别串联的重复级。
+     *
+     * `RX_RX0 Digital Volume` / `RX_RX1 Digital Volume` → `rx_rx digital volume`
+     */
+    private fun stageKey(name: String): String = name.lowercase()
+        .replace(Regex("""\d+"""), "")
+        .replace("mix", "")
+        .replace(Regex("""[\s_]+"""), " ")
+        .trim()
 
     // ── 硬件增益 ────────────────────────────────────────────────────────────
 
@@ -322,6 +353,10 @@ class RootAudioManager private constructor(private val context: Context) {
      *
      * 以「首次应用前的原始值」为基准，因此 6 → 12 dB 是重算而不是叠加，
      * 反复拖动不会一路顶到芯片上限。
+     *
+     * 只写**一级**音量控制（见 [pickTargets]），所以 `db` 就是真实增益：
+     * 档位 × 0.5 dB/档 = db。若某一级被芯片上限截断，回写的
+     * [RootState.appliedDb] 是**实际达成**的值，不是滑杆值。
      */
     suspend fun applyGain(db: Int): Boolean = withContext(Dispatchers.IO) {
         val tool = mixerTool
@@ -335,6 +370,7 @@ class RootAudioManager private constructor(private val context: Context) {
         val originals = loadOriginals()
         val details = ArrayList<String>()
         var success = 0
+        var achievedUnits = Int.MAX_VALUE
 
         for (control in targets) {
             val base = originals[control.name] ?: control.value ?: continue
@@ -344,6 +380,7 @@ class RootAudioManager private constructor(private val context: Context) {
             val target = (base + db * UnitsPerDb).coerceIn(min, max)
             if (setControl(tool, card, control, target)) {
                 success++
+                achievedUnits = minOf(achievedUnits, target - base)
                 details += "${control.name} $base→$target"
             }
         }
@@ -353,10 +390,21 @@ class RootAudioManager private constructor(private val context: Context) {
             return@withContext false
         }
 
+        // 实际达成的 dB：被上限截断时如实反映，UI 不再显示做不到的数字
+        val achievedDb = if (achievedUnits == Int.MAX_VALUE) {
+            0
+        } else {
+            (achievedUnits.toFloat() / UnitsPerDb).roundToInt().coerceAtLeast(0)
+        }
+
         saveOriginals(originals)
-        prefs.edit().putInt("gain_db", db).putString("detail", details.joinToString("；")).apply()
+        // 交给守护进程维持偏移：系统音量一变就会重写这些寄存器，
+        // 由 uid 0 的守护进程每秒补回来，用户调音量依然有效。
+        daemonClient.writeMixer(tool, card, achievedDb * UnitsPerDb, targets, originals)
+        prefs.edit().putInt("gain_db", achievedDb)
+            .putString("detail", details.joinToString("；")).apply()
         _state.value = _state.value.copy(
-            appliedDb = db,
+            appliedDb = achievedDb,
             appliedDetail = details.joinToString("；"),
             error = null,
         )
@@ -368,6 +416,8 @@ class RootAudioManager private constructor(private val context: Context) {
         val tool = mixerTool
         val card = cardIndex
         val originals = loadOriginals()
+        // 先停掉守护，否则刚恢复完又会被补回偏移
+        daemonClient.clearMixer()
         if (tool == null || card < 0 || originals.isEmpty()) {
             prefs.edit().remove("gain_db").remove("detail").remove("originals").apply()
             _state.value = _state.value.copy(appliedDb = 0, appliedDetail = null)

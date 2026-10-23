@@ -28,7 +28,8 @@
 - 🎧 **虚拟环绕**：仅在插入耳机 / 蓝牙时可用，扬声器下自动置灰
 - 🎙️ **单声道**：直接写系统 `master_mono`（等同于「无障碍 → 单声道音频」），ROOT 下无需任何授权
 - 🎼 **4 个预设**：标准增强 +10dB / 人声增强 +12dB / 外放最大 +16dB / 夜间清晰 +8dB
-- 🔓 **硬件增益**：`tinymix` 直接抬高 codec 的 `* Digital Volume`（最高 +12 dB，以原始值为基准，可一键恢复）
+- 🔓 **硬件增益**：`tinymix` 直接抬高 codec 的数字音量（最高 +12 dB）。同一通路上串联的两级衰减器只写一级，滑杆刻度就是真实增益；以首次应用前的原始值为基准，可一键恢复
+- 🔒 **偏移守护**：守护进程每 1.2 秒核对一次 codec 音量，系统音量一变就以新值为基准重新补上偏移——调系统音量依然有效，但增强不会掉
 - 🔓 **释放全局音效通道**：临时禁用杜比 / 小米音效包并重启 audioserver，避免它们和本应用抢 session 0 的音效槽位
 - 🌙 **Material 3 明暗主题**、毛玻璃卡片、iOS 风格底部 Dock，单页面简洁 UI
 - 📵 **零危险权限**：不申请 `RECORD_AUDIO`、`MODIFY_AUDIO_SETTINGS`、`WRITE_SETTINGS`、`FOREGROUND_SERVICE`、`POST_NOTIFICATIONS`
@@ -74,14 +75,16 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 | 能力 | 做法 | 说明 |
 |---|---|---|
 | **ROOT 全局音效** | 用 `su` 起一个 uid 0 的 `app_process` 守护进程（`RootDaemon`），在进程内把 `DynamicsProcessing` 挂到 session 0 | 普通 App 创建全局音效会被 AudioFlinger 以缺少 `MODIFY_AUDIO_ROUTING` 拒绝；uid 0 进程不受此限制，这是真机报「系统拒绝了音效创建」的正解 |
-| **硬件增益** | `tinymix` 读写 codec 的扬声器音量控件 | 唯一能突破「数字信号已到 0 dBFS」天花板的手段，最高 +12 dB；以首次应用前的原始值为基准，反复拖动不叠加，可一键恢复 |
+| **硬件增益** | `tinymix` 读写 codec 的数字音量控件 | 唯一能突破「数字信号已到 0 dBFS」天花板的手段，最高 +12 dB。同一 RX 通路上 `Digital Volume` 与 `Mix Digital Volume` 是**串联的两级**，只写其中一级，所以滑杆刻度就是真实增益；以首次应用前的原始值为基准，反复拖动不叠加，可一键恢复 |
+| **偏移守护** | 守护进程每 1.2 秒读一次 codec 当前值，发现被系统改写就重新补上偏移 | 调系统音量时 AudioService 会重写这些寄存器，把增强冲掉。守护进程以「用户当前音量」为新基准重新加偏移，所以调音量依然有效、增强也不会掉；关闭开关时把偏移减掉，正好回到用户自己的档位 |
 | **释放全局音效通道** | `pm disable-user --user 0 <厂商音效包>` + `setprop ctl.restart audioserver` | 杜比 / DTS / 小米音效会独占 session 0 的音效链路，禁掉后本应用的音效才能挂上去；可随时恢复 |
 
 ### 守护进程
 
 - **位置**：`com.volumeboost.app.daemon.RootDaemon`，通过 `app_process` 以 uid 0 启动
 - **启动命令**：`CLASSPATH=<apk> nohup setsid app_process /system/bin com.volumeboost.app.daemon.RootDaemon <cmd> <status> >> <log> 2>&1 &`
-- **通信**：文件轮询，App 写 `files/vb_daemon.cmd`，守护进程每 250 ms 读一次，状态写 `files/vb_daemon.status`
+- **通信**：文件轮询，App 写 `files/vb_daemon.cmd`，守护进程每 250 ms 读一次，状态写 `files/vb_daemon.status`；音效参数（`active/boost/eq/bass/virt`）与硬件音量守护参数（`mixer_*`）分行存放，两边互不覆盖
+- **硬件音量守护**：`mixer_offset` 是相对用户音量的偏移档位（0.5 dB/档），`mixer_names` 是 `名字|基准值|最小|最大` 的列表；守护进程每 1.2 秒核一次，只在值被别人改动时补写，不会每轮都写寄存器
 - **心跳**：每 2 秒刷新一次状态文件的 `ts`；App 启动时读心跳，若发现它还在跑就自动接管界面状态（不会出现「显示已关闭但声音还在增强」）
 - **生命周期**：关闭开关写 `active=0`，守护进程自行释放音效并退出；配置文件被删除超过 5 秒也会自动退出
 - **后台常驻**：用 `setsid` 脱离 App 会话，并把 `oom_score_adj` 调到 `-900`，App 退出 / 被划掉后仍继续工作；**因此不需要前台服务，也不显示常驻通知**
@@ -114,6 +117,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 **硬件增益滑杆是灰的**
 两种可能：设备没有 `tinymix`（部分 ROM 精简掉了），或者没匹配到可写的输出音量控件。打开设置页「音效诊断」，看「混音器工具」「声卡」「匹配到的音量控制」三行；若「控制项总数」不为 0 但「匹配到的音量控制」为 0，把诊断里那段「候选控制项」列表贴到 issue，即可补充匹配规则。
+
+**调了系统音量之后增强好像没了**
+不会掉。守护进程每 1.2 秒核对一次，发现 codec 音量被系统重写就按新音量重新补上偏移。若想确认，拖一下硬件增益滑杆，明细里会显示当前写入值。
 
 **重启后失效**
 临时 ROOT 重启即失效，属预期行为。持久化 ROOT（KernelSU / Magisk 模块）可做到开机自启。
