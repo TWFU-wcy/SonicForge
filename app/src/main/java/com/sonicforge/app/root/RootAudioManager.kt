@@ -128,8 +128,11 @@ class RootAudioManager private constructor(private val context: Context) {
     private suspend fun restoreLegacyGain(): String {
         val raw = prefs.getString("originals", null)
         val gainDb = prefs.getInt("gain_db", 0)
-        prefs.edit().remove("gain_db").remove("detail").remove("originals").apply()
-        if (raw.isNullOrBlank()) return ""
+        if (raw.isNullOrBlank()) {
+            // 没有旧数据也要把残留的展示字段清掉，免得设置页还显示一个假的 +N dB
+            prefs.edit().remove("gain_db").remove("detail").apply()
+            return ""
+        }
         val originals = runCatching {
             val json = JSONObject(raw)
             buildMap {
@@ -138,7 +141,8 @@ class RootAudioManager private constructor(private val context: Context) {
         }.getOrDefault(emptyMap())
         if (originals.isEmpty()) return ""
 
-        val tool = findTinymix() ?: return "未找到 tinymix，codec 音量需重启后自动恢复"
+        // 找不到工具就保留记录，下次进设置页再试一次（写回原始值是幂等的，重试无害）
+        val tool = findTinymix() ?: return "未找到 tinymix，下次检测时再试"
         val pending = originals.toMutableMap()
         for (card in 0 until MaxCardScan) {
             val iterator = pending.entries.iterator()
@@ -151,10 +155,18 @@ class RootAudioManager private constructor(private val context: Context) {
             if (pending.isEmpty()) break
         }
         val restored = originals.size - pending.size
+        if (pending.isEmpty()) {
+            // 全部写回成功才清记录；没成功就留着，下次进设置页接着试
+            prefs.edit().remove("gain_db").remove("detail").remove("originals").apply()
+        } else {
+            val remaining = JSONObject()
+            pending.forEach { (name, value) -> remaining.put(name, value) }
+            prefs.edit().putString("originals", remaining.toString()).apply()
+        }
         return when {
             pending.isEmpty() -> "已恢复 $restored 项原始值（升级前为 +${gainDb}dB）"
-            restored == 0 -> "恢复失败，codec 音量需重启后自动恢复"
-            else -> "已恢复 $restored/${originals.size} 项，其余需重启后自动恢复"
+            restored == 0 -> "恢复失败，下次检测时再试"
+            else -> "已恢复 $restored/${originals.size} 项，其余下次再试"
         }
     }
 
