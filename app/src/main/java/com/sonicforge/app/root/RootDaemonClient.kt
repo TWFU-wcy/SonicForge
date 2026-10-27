@@ -41,8 +41,8 @@ data class DaemonConfigSnapshot(
     val boost: Int,
     val eq: IntArray,
     val bass: Int,
-    /** 系统音量最大时保留的最小补偿，单位 1/100 dB。 */
-    val boostMin: Int = 120,
+    /** 系统音量最大时保留的最小补偿，单位 1/100 dB（默认 0 = 完全让路）。 */
+    val boostMin: Int = 0,
     val leveler: Int = 0,
 )
 
@@ -70,7 +70,7 @@ class RootDaemonClient(private val context: Context) {
         boost: Int,
         eq: IntArray,
         bass: Int,
-        boostMin: Int = 120,
+        boostMin: Int = 0,
         leveler: Int = 0,
     ) {
         updateLines { lines ->
@@ -272,7 +272,7 @@ class RootDaemonClient(private val context: Context) {
         var boost = 0
         var eq = IntArray(0)
         var bass = 0
-        var boostMin = 120
+        var boostMin = 0
         var leveler = 0
         text.lineSequence().forEach { line ->
             val idx = line.indexOf('=')
@@ -282,7 +282,7 @@ class RootDaemonClient(private val context: Context) {
             when (key) {
                 "active" -> active = value == "1"
                 "boost" -> boost = value.toIntOrNull() ?: 0
-                "boost_min" -> boostMin = value.toIntOrNull() ?: 120
+                "boost_min" -> boostMin = value.toIntOrNull() ?: 0
                 "eq" -> eq = value.split(',').mapNotNull { it.toIntOrNull() }.toIntArray()
                 "bass" -> bass = value.toIntOrNull() ?: 0
                 "leveler" -> leveler = value.toIntOrNull() ?: 0
@@ -307,7 +307,7 @@ class RootDaemonClient(private val context: Context) {
          * 守护进程状态文件里新增字段时，两个数字一起 +1，
          * 这样老进程会被自动杀掉重拉，不会再出现「新 APK 跑旧代码」。
          */
-        const val DAEMON_PROTOCOL_VERSION = 3
+        const val DAEMON_PROTOCOL_VERSION = 4
 
         /** 音效链那几行的 key。 */
         private val EffectKeys = setOf("active", "boost", "boost_min", "eq", "bass", "leveler")

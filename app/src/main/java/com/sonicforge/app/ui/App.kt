@@ -1012,7 +1012,7 @@ private fun TunePage(
             ValueSlider(
                 label = "最大补偿",
                 value = state.boostMillibel.toFloat(),
-                range = Preset.FloorBoostMillibel.toFloat()..state.maxBoostMillibel.toFloat(),
+                range = Preset.MinSliderBoostMillibel.toFloat()..state.maxBoostMillibel.toFloat(),
                 display = "+%d%%".format(Preset.perceivedPercent(state.boostMillibel)),
                 enabled = state.active && !state.pausedForHeadset,
                 onChange = { onBoostChange(it.toInt()) },
@@ -1564,7 +1564,7 @@ private fun previewState() = AudioState(
     mode = EngineMode.ROOT,
     boostMillibel = 500,
     minBoostMillibel = Preset.FloorBoostMillibel,
-    effectiveBoostMillibel = 380,
+    effectiveBoostMillibel = 321,
     systemVolume = 6,
     maxSystemVolume = 15,
     eqLevelsDb = intArrayOf(0, 120, 0, -60, 0, 60, 0, 0, -120, 0),

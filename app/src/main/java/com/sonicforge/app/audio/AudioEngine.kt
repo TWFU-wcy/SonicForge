@@ -163,7 +163,7 @@ class AudioEngine(context: Context) {
         val volume = readSystemVolume()
         // 配置文件里的 boost 是「小音量时的补偿上限」，不是当前实际值；
         // 实际值由上限 + 当前系统音量折算出来。
-        val maxBoost = (cfg?.boost ?: presetMaxBoost).coerceIn(Preset.FloorBoostMillibel, MaxBoostMillibel)
+        val maxBoost = (cfg?.boost ?: presetMaxBoost).coerceIn(Preset.MinSliderBoostMillibel, MaxBoostMillibel)
         val minBoost = (cfg?.boostMin ?: Preset.FloorBoostMillibel)
             .coerceIn(Preset.FloorBoostMillibel, maxBoost)
         val effective = Preset.effectiveBoostMillibel(maxBoost, minBoost, volume.first, volume.second)
@@ -305,12 +305,12 @@ class AudioEngine(context: Context) {
      * 调整增益上限（滑杆拖的是「低音量时补多少」）。
      *
      * 实际下发的是按当前系统音量折算后的值：用户把上限调高，满音量时
-     * 也只会拿到 [Preset.FloorBoostMillibel] 那一档，不会因为拖满而破音。
+     * 也只会拿到 [Preset.FloorBoostMillibel]（0 dB），不会因为拖满而破音。
      */
     @Synchronized
     fun setBoost(millibel: Int) {
         if (_state.value.mode != EngineMode.ROOT) return
-        val v = millibel.coerceIn(Preset.FloorBoostMillibel, MaxBoostMillibel)
+        val v = millibel.coerceIn(Preset.MinSliderBoostMillibel, MaxBoostMillibel)
         presetMaxBoost = v
         val volume = readSystemVolume()
         val effective = Preset.effectiveBoostMillibel(

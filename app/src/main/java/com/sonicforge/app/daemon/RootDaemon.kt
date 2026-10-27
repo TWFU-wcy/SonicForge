@@ -4,10 +4,9 @@ import android.media.audiofx.AudioEffect
 import android.media.audiofx.DynamicsProcessing
 import android.media.audiofx.LoudnessEnhancer
 import android.util.Log
+import com.sonicforge.app.audio.Preset
 import java.io.File
 import kotlin.math.ln
-import kotlin.math.pow
-import kotlin.math.roundToInt
 
 /**
  * ROOT 音频守护进程。
@@ -34,7 +33,7 @@ object RootDaemon {
     private const val LimiterThresholdDb = -1.5f
     private const val MinInputGainDb = -20f
     private const val MaxInputGainDb = 18f
-    private const val MaxBassExtraDb = 6f
+    private const val MaxBassExtraDb = Preset.BassMaxExtraDbMillibel / 100f
     private const val DegradedMaxMillibel = 800
 
     private val BandCountCandidates = intArrayOf(10, 8, 6, 5, 3)
@@ -52,7 +51,7 @@ object RootDaemon {
      *
      * 只要状态文件里新增/改动了字段，这个数字就要 +1。
      */
-    private const val ProtocolVersion = 3
+    private const val ProtocolVersion = 4
 
     /** 三段的分频点（Hz），也是每段的截止频率。 */
     private val MbcCutoffs = floatArrayOf(200f, 2000f, 20000f)
@@ -199,7 +198,7 @@ object RootDaemon {
                     }
                 }
             }
-            // 系统音量轮询：用户按音量键后增益自动递减，满音量时只留最小补偿。
+            // 系统音量轮询：用户按音量键后增益自动递减，满音量时补偿归零。
             // 放在这里而不是只依赖 App，是因为守护进程会活到 App 被杀之后。
             if (System.currentTimeMillis() - lastVolumeTick > VolumePollMs) {
                 lastVolumeTick = System.currentTimeMillis()
@@ -486,8 +485,8 @@ object RootDaemon {
         val eq: IntArray,
         /** 系统音量最低时的低音强度 0..1000。 */
         val bass: Int,
-        /** 系统音量最大时保留的补偿，单位 1/100 dB。 */
-        val boostMin: Int = 120,
+        /** 系统音量最大时保留的补偿，单位 1/100 dB（默认 0 = 完全让路）。 */
+        val boostMin: Int = 0,
         /** 响度均衡强度 0..1000，0 = 关闭。 */
         val leveler: Int = 0,
         /** tinymix 路径，null 表示不守护硬件音量。 */
@@ -507,18 +506,16 @@ object RootDaemon {
         /**
          * 按系统音量折算出一份实际要下发的配置。
          *
-         * 曲线与 App 侧 [Preset.effectiveBoostMillibel] 保持一致（`1 - v^1.6`），
-         * 这样 App 在不在都能得到同样的结果 —— 守护进程独立于 App 运行，
-         * 用户按音量键时不能指望 App 还活着去改配置。
+         * 直接调用 App 侧的 [Preset.effectiveBoostMillibel]：两条链必须用**同一个函数**，
+         * 否则界面显示的折算值和实际下发的值会对不上，也容易出现"某档音量比满音量还响"。
+         * 守护进程独立于 App 运行，用户按音量键时不能指望 App 还活着去改配置。
          */
         fun withVolume(volume: Int, maxVolume: Int): DaemonConfig {
             if (maxVolume <= 0) return this
-            val v = (volume.toFloat() / maxVolume).coerceIn(0f, 1f)
-            val weight = 1f - v.pow(1.6f)
             val max = boost.coerceAtLeast(0)
             val min = boostMin.coerceIn(0, max)
-            val effBoost = (min + (max - min) * weight).roundToInt().coerceIn(min, max)
-            val effBass = (bass * (1f - 0.45f * v)).roundToInt().coerceIn(0, 1000)
+            val effBoost = Preset.effectiveBoostMillibel(max, min, volume, maxVolume)
+            val effBass = Preset.effectiveBass(bass, volume, maxVolume)
             if (effBoost == boost && effBass == bass) return this
             return DaemonConfig(
                 active, effBoost, eq, effBass, boostMin, leveler,
@@ -531,7 +528,7 @@ object RootDaemon {
                 var active = true
                 var boost = 500
                 var bass = 0
-                var boostMin = 120
+                var boostMin = 0
                 var leveler = 0
                 var eq = IntArray(0)
                 var mixerTool: String? = null
