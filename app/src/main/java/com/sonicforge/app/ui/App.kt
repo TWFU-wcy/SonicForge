@@ -506,7 +506,15 @@ private fun HomePage(
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     GainDial(
-                        progress = if (state.active && !state.pausedForHeadset) (state.effectiveBoostMillibel / state.maxBoostMillibel.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f) else 0f,
+                        // 满量程 = 全链路硬上限（+4 dB），不是用户当前的滑杆值：
+                        // 只有真的把补偿推到 4 dB 时表盘才拉满，滑杆调低时表盘会留出余量，
+                        // 用户一眼能看出「离天花板还有多远」。
+                        progress = if (state.active && !state.pausedForHeadset) {
+                            (state.effectiveBoostMillibel / Preset.MaxSliderBoostMillibel.toFloat())
+                                .coerceIn(0f, 1f)
+                        } else {
+                            0f
+                        },
                         active = state.active && !state.pausedForHeadset,
                     )
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -568,7 +576,10 @@ private fun HomePage(
                             modifier = Modifier.weight(1f),
                         )
                         Text(
-                            text = "+%d%%".format(Preset.perceivedPercent(state.boostMillibel)),
+                            text = "+%d%% · %.1f dB".format(
+                                Preset.perceivedPercent(state.boostMillibel),
+                                state.boostMillibel / 100f,
+                            ),
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.primary,
@@ -712,10 +723,10 @@ private fun PresetRow(
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    imageVector = when {
-                        item.boostMillibel >= 550 -> Icons.Filled.Speaker
-                        item.boostMillibel >= 400 -> Icons.Filled.GraphicEq
-                        else -> Icons.Filled.Headphones
+                    imageVector = when (item.id) {
+                        Preset.Speaker.id -> Icons.Filled.Speaker
+                        Preset.Night.id -> Icons.Filled.Headphones
+                        else -> Icons.Filled.GraphicEq
                     },
                     contentDescription = null,
                     tint = if (selected) MaterialTheme.colorScheme.primary
@@ -734,8 +745,7 @@ private fun PresetRow(
                 )
                 Spacer(Modifier.height(3.dp))
                 Text(
-                    text = "+%d%% ~ +%d%% · 低音 %d%%".format(
-                        Preset.perceivedPercent(item.minBoostMillibel),
+                    text = "最大 +%d%% · 低音 %d%%".format(
                         Preset.perceivedPercent(item.boostMillibel),
                         item.bassBoostStrength / 10,
                     ),
@@ -1006,7 +1016,15 @@ private fun TunePage(
                 label = "最大补偿",
                 value = state.boostMillibel.toFloat(),
                 range = Preset.MinSliderBoostMillibel.toFloat()..state.maxBoostMillibel.toFloat(),
-                display = "+%d%%".format(Preset.perceivedPercent(state.boostMillibel)),
+                // 每 0.1 dB 一档：1.0~4.0 dB 共 30 个中间档
+                steps = (state.maxBoostMillibel - Preset.MinSliderBoostMillibel) / 10 - 1,
+                display = "最大 +%d%% · %.1f dB".format(
+                    Preset.perceivedPercent(state.boostMillibel),
+                    state.boostMillibel / 100f,
+                ),
+                caption = "滑杆顶端就是全链路硬上限 +%.1f dB，拖满也不会超过它".format(
+                    state.maxBoostMillibel / 100f,
+                ),
                 enabled = state.active && !state.pausedForHeadset,
                 onChange = { onBoostChange(it.toInt()) },
             )
@@ -1087,6 +1105,7 @@ private fun TunePage(
                 label = "低音增强",
                 value = state.bassBoostStrength.toFloat(),
                 range = 0f..1000f,
+                steps = 99,
                 display = "%d%%".format(state.bassBoostStrength / 10),
                 enabled = state.active && !state.pausedForHeadset,
                 onChange = { onBassChange(it.toInt()) },
@@ -1096,6 +1115,7 @@ private fun TunePage(
                 label = "响度均衡",
                 value = state.levelerStrength.toFloat(),
                 range = 0f..1000f,
+                steps = 99,
                 display = when {
                     !state.active -> "需开启增强"
                     !state.levelerAvailable -> "本机不支持"
@@ -1466,6 +1486,8 @@ private fun ValueSlider(
     display: String,
     enabled: Boolean,
     onChange: (Float) -> Unit,
+    steps: Int = 0,
+    caption: String? = null,
 ) {
     Column(Modifier.fillMaxWidth()) {
         Row(
@@ -1490,6 +1512,7 @@ private fun ValueSlider(
             value = value.coerceIn(range.start, range.endInclusive),
             onValueChange = onChange,
             valueRange = range,
+            steps = steps,
             enabled = enabled,
             colors = SliderDefaults.colors(
                 thumbColor = MaterialTheme.colorScheme.primary,
@@ -1498,6 +1521,14 @@ private fun ValueSlider(
             ),
             modifier = Modifier.fillMaxWidth(),
         )
+        if (caption != null) {
+            Text(
+                text = caption,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 10.dp),
+            )
+        }
     }
 }
 
@@ -1508,9 +1539,9 @@ private fun ValueSlider(
 private fun previewState() = AudioState(
     active = true,
     mode = EngineMode.ROOT,
-    boostMillibel = 500,
+    boostMillibel = Preset.Default.boostMillibel,
     minBoostMillibel = Preset.FloorBoostMillibel,
-    effectiveBoostMillibel = 321,
+    effectiveBoostMillibel = 254,
     systemVolume = 6,
     maxSystemVolume = 15,
     eqLevelsDb = intArrayOf(0, 120, 0, -60, 0, 60, 0, 0, -120, 0),

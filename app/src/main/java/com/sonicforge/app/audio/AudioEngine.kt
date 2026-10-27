@@ -70,7 +70,7 @@ data class AudioState(
     /** 是否因为输出到耳机/蓝牙而自动暂停了全部处理。 */
     val pausedForHeadset: Boolean = false,
     /** 当前模式下允许的最大增益，UI 用它限制滑块。 */
-    val maxBoostMillibel: Int = 1800,
+    val maxBoostMillibel: Int = Preset.MaxSliderBoostMillibel,
 ) {
     /** 按当前系统音量折算后的真实增益（dB），主页显示的就是它。 */
     val gainDb: Float get() = effectiveBoostMillibel / 100f
@@ -651,8 +651,13 @@ class AudioEngine(context: Context) {
         /** 预设曲线的标准频点（Hz），守护进程也按这套频点建链。 */
         val CanonicalEqFreqs = intArrayOf(31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000)
 
-        /** 增益上限 +18 dB（限幅器保证不会削波）。 */
-        const val MaxBoostMillibel = 1800
+        /**
+         * 增益上限：与 [Preset.MaxSliderBoostMillibel] 同值（+4 dB）。
+         *
+         * 以前留到 +18 dB，滑杆有大半段是用户永远用不到、却随时能拖进去的高风险区；
+         * 现在直接封顶在外放最大预设的档位，滑杆拖满就是全链路的硬上限。
+         */
+        const val MaxBoostMillibel = Preset.MaxSliderBoostMillibel
 
         const val MinEqDb = -1200
         const val MaxEqDb = 1200

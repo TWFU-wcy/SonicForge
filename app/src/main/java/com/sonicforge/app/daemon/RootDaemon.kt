@@ -32,9 +32,10 @@ object RootDaemon {
 
     private const val LimiterThresholdDb = -1.5f
     private const val MinInputGainDb = -20f
-    private const val MaxInputGainDb = 18f
+    /** 输入增益硬顶，与 App 侧滑杆上限一致（+4 dB）。 */
+    private const val MaxInputGainDb = Preset.MaxSliderBoostMillibel / 100f
     private const val MaxBassExtraDb = Preset.BassMaxExtraDbMillibel / 100f
-    private const val DegradedMaxMillibel = 800
+    private const val DegradedMaxMillibel = Preset.MaxSliderBoostMillibel
 
     private val BandCountCandidates = intArrayOf(10, 8, 6, 5, 3)
     private val CanonicalEqFreqs = intArrayOf(31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000)
@@ -480,7 +481,8 @@ object RootDaemon {
          */
         fun withVolume(volume: Int, maxVolume: Int): DaemonConfig {
             if (maxVolume <= 0) return this
-            val max = boost.coerceAtLeast(0)
+            // 配置可能来自更早的版本（那时滑杆能拖到 18 dB），这里再夹一次硬顶
+            val max = boost.coerceIn(0, Preset.MaxSliderBoostMillibel)
             val min = boostMin.coerceIn(0, max)
             val effBoost = Preset.effectiveBoostMillibel(max, min, volume, maxVolume)
             val effBass = Preset.effectiveBass(bass, volume, maxVolume)
@@ -491,7 +493,7 @@ object RootDaemon {
         companion object {
             fun parse(text: String): DaemonConfig {
                 var active = true
-                var boost = 500
+                var boost = Preset.MaxSliderBoostMillibel
                 var bass = 0
                 var boostMin = 0
                 var leveler = 0

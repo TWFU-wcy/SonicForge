@@ -39,6 +39,15 @@ data class Preset(
         const val MinSliderBoostMillibel = 100
 
         /**
+         * 「最大补偿」滑杆的**上限**，也是整条软件增益链的硬顶：**4 dB**。
+         *
+         * 这个值就是「外放最大」预设的上限——真机上 6 dB 已经能把外放推到破音边缘，
+         * 4 dB 是实测安全且仍有明显提升的档位。滑杆不再留到 +18 dB，
+         * 用户拖不到、也不会拖出高风险区间；守护进程同样按这个值夹取。
+         */
+        const val MaxSliderBoostMillibel = 400
+
+        /**
          * 主增益曲线的**斜率预算**，单位 1/100 dB 每 1.0 音量。
          *
          * 系统音量本身在衰减信号：按线性幅度折算，`d(20·log10 v)/dv = 8.686 / v`，
@@ -49,7 +58,7 @@ data class Preset(
          * 560 + 180 = 740，留 14.8% 余量。余量不是浪费：下发值以 1/100 dB 取整，
          * 每档最多引入 ±1.6 毫贝尔的量化误差，档位越细每档的真实涨幅越小，
          * 余量不够时取整噪声就会把某两档的顺序翻过来。留到 740 之后，
-         * 上限 1~18 dB 逐毫贝尔 × 低音 0~1000 逐档 × 15/16/25/30/50/100 档音量
+         * 上限 1~4 dB 逐毫贝尔 × 低音 0~1000 逐档 × 15/16/25/30/50/100 档音量
          * 全部实测 0 倒挂（覆盖所有真机音量档数）。
          */
         const val BoostSlopeBudgetMillibel = 560
@@ -118,7 +127,7 @@ data class Preset(
          * 把 dB 换算成人耳感知的响度增幅百分比。
          *
          * 用 sone 标度：响度每 +10 dB 翻一倍，即 `2^(dB/10)`。
-         * 所以 +6 dB ≈ +52%，+3 dB ≈ +23%，+1.2 dB ≈ +8.7%。
+         * 所以 +4 dB ≈ +32%，+3 dB ≈ +23%，+1.2 dB ≈ +8.7%。
          * 比直接显示电压倍数（+6 dB = 2 倍）更接近"听起来大了多少"。
          */
         fun perceivedPercent(millibel: Int): Int {
@@ -133,7 +142,7 @@ data class Preset(
         val Default = Preset(
             id = "default",
             label = "标准增强",
-            boostMillibel = 500,
+            boostMillibel = 330,
             minBoostMillibel = FloorBoostMillibel,
             eqLevelsDb = intArrayOf(-150, -80, 0, 40, 0, 60, 120, 80, 20, -120),
             bassBoostStrength = 250,
@@ -144,7 +153,7 @@ data class Preset(
         val Voice = Preset(
             id = "voice",
             label = "人声增强",
-            boostMillibel = 400,
+            boostMillibel = 270,
             minBoostMillibel = FloorBoostMillibel,
             eqLevelsDb = intArrayOf(-300, -200, -50, 120, 260, 360, 300, 140, -60, -260),
             bassBoostStrength = 0,
@@ -155,7 +164,7 @@ data class Preset(
         val Speaker = Preset(
             id = "speaker",
             label = "外放最大",
-            boostMillibel = 600,
+            boostMillibel = MaxSliderBoostMillibel,
             minBoostMillibel = FloorBoostMillibel,
             eqLevelsDb = intArrayOf(0, 60, 60, 30, 0, 50, 150, 110, 30, -180),
             bassBoostStrength = 450,
@@ -166,7 +175,7 @@ data class Preset(
         val Night = Preset(
             id = "night",
             label = "夜间清晰",
-            boostMillibel = 300,
+            boostMillibel = 200,
             minBoostMillibel = FloorBoostMillibel,
             eqLevelsDb = intArrayOf(180, 140, 40, 0, -40, 20, 160, 220, 160, 0),
             bassBoostStrength = 150,
