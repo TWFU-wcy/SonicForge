@@ -83,6 +83,7 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.scale
+import com.sonicforge.app.BuildConfig
 import com.sonicforge.app.root.RootState
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.layer.GraphicsLayer
@@ -1275,7 +1276,7 @@ private fun SettingsPage(
                 Preset.All.firstOrNull { it.id == state.presetId }?.label ?: "自定义",
             )
             Spacer(Modifier.height(12.dp))
-            InfoRow("版本", "1.3.6")
+            InfoRow("版本", BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ")")
         }
 
         Spacer(Modifier.height(120.dp))

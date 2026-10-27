@@ -21,8 +21,8 @@ android {
         applicationId = "com.sonicforge.app"
         minSdk = 28
         targetSdk = 35
-        versionCode = 17
-        versionName = "1.3.9"
+        versionCode = 18
+        versionName = "1.4.0"
     }
 
     signingConfigs {
@@ -65,6 +65,8 @@ android {
 
     buildFeatures {
         compose = true
+        // 设置页的版本号直接读 BuildConfig，避免手写常量忘了同步
+        buildConfig = true
     }
 }
 
