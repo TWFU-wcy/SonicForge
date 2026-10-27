@@ -7,7 +7,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import kotlin.math.roundToInt
 
 /**
  * ROOT 侧能力的状态快照。
@@ -18,20 +17,6 @@ data class RootState(
     /** su 是否可用。 */
     val available: Boolean = false,
     val suPath: String? = null,
-    /** 实际使用的混音器工具路径，null 表示没找到或打不开。 */
-    val mixerTool: String? = null,
-    /** 实际选中的声卡编号（tinymix -D 的参数）。 */
-    val cardIndex: Int = -1,
-    /** 选中声卡的名字，例如 `msm8998-tasha-snd-card`。 */
-    val cardName: String? = null,
-    /** 混音器控制项总数。 */
-    val controlCount: Int = 0,
-    /** 被判定为「输出音量」的控制项。 */
-    val targets: List<MixerControl> = emptyList(),
-    /** 当前已应用的硬件增益（dB）。 */
-    val appliedDb: Int = 0,
-    /** 实际写入的明细，例如 `RX0 Digital Volume 84→108`。 */
-    val appliedDetail: String? = null,
     /** 系统单声道当前状态。 */
     val mono: Boolean = false,
     /** 系统里被识别为「厂商音效」的包名。 */
@@ -44,44 +29,19 @@ data class RootState(
 )
 
 /**
- * ROOT 硬件增强管理器。
+ * ROOT 能力管理器。
  *
- * 三条能力：
- * 1. **硬件增益**：通过 tinymix 直接抬高 codec 的 RX / Speaker 数字音量，
- *    这是唯一能突破「数字信号已到 0 dBFS」这条天花板的手段。
- * 2. **释放全局音效通道**：禁用厂商音效服务（杜比 / 小米音效），
+ * 两条能力：
+ * 1. **释放全局音效通道**：禁用厂商音效服务（杜比 / 小米音效），
  *    避免它们和本应用的音效抢 session 0 的音效槽位。
- * 3. **系统单声道**：`settings put system master_mono`，不需要「修改系统设置」权限。
+ * 2. **系统单声道**：`settings put system master_mono`，不需要「修改系统设置」权限。
+ *
+ * 音量增强本身全部由 uid 0 的守护进程在系统混音链上完成（见 [com.sonicforge.app.daemon.RootDaemon]），
+ * 这里不再直接读写 codec 的硬件音量。
  */
 class RootAudioManager private constructor(private val context: Context) {
 
     companion object {
-        /** UI 上硬件增益滑杆的上限。 */
-        const val MaxGainDb = 12
-
-        /** Qualcomm codec 的 Digital Volume 通常是 0.5 dB 一档。 */
-        private const val UnitsPerDb = 2
-
-        /** 最多扫描多少张声卡（card 0..MaxCardScan-1）。 */
-        private const val MaxCardScan = 8
-
-        /**
-         * 输出音量控制的候选名。
-         *
-         * 覆盖 Qualcomm 的 RX / Spkr / WSA / PA Volume、
-         * 智能功放的 aw / tas / cs35 系列，以及通用的 Master / PCM / Digital Volume。
-         */
-        private val GainNameRegex = Regex(
-            "(?i)(speaker|spk|spkr|spkm|spkl|rx[0-9]|rx[ _]|hph|headphone|earpiece|" +
-                "master|pcm|digital volume|pa volume|boost volume|dac|mono|wsa|aw8|tas25|cs35)"
-        )
-
-        /** 明确是录音侧 / 通话侧的控制，绝不能动。 */
-        private val ExcludeRegex = Regex(
-            "(?i)(mic|adc|dec|tx[ _0-9]|capture|record|input|dmic|amix|aif|vad|voice|call|" +
-                "hfi|slim|echo|aec|ns\\b)"
-        )
-
         private val VendorKeywords = listOf(
             "dolby", "dax", "dts", "audioeffect", "audio.effect", "harman",
             "miui.audio", "miui.sound", "misound", "spatializer", "bsp.audio",
@@ -89,6 +49,9 @@ class RootAudioManager private constructor(private val context: Context) {
 
         /** 名字里带这些的不是「音效处理器」，禁用了没意义甚至有害。 */
         private val VendorExclude = listOf("monitor", "capture", "listener", "diagnostic")
+
+        /** 一次性迁移最多扫多少张声卡（card 0..MaxCardScan-1）。 */
+        private const val MaxCardScan = 8
 
         @Volatile
         private var instance: RootAudioManager? = null
@@ -101,15 +64,6 @@ class RootAudioManager private constructor(private val context: Context) {
     private val prefs = context.getSharedPreferences("root_audio", Context.MODE_PRIVATE)
     private val _state = MutableStateFlow(RootState())
     val state: StateFlow<RootState> = _state.asStateFlow()
-
-    /** 把「保持偏移」的活儿交给守护进程，见 [applyGain]。 */
-    private val daemonClient = RootDaemonClient(context)
-
-    @Volatile
-    private var mixerTool: String? = null
-
-    @Volatile
-    private var cardIndex: Int = -1
 
     // ── 检测 ────────────────────────────────────────────────────────────────
 
@@ -127,15 +81,10 @@ class RootAudioManager private constructor(private val context: Context) {
             return@withContext
         }
 
-        val tool = findMixerTool()
-        mixerTool = tool
+        // 升级自老版本（带硬件增益的版本）时，把当年写高的 codec 音量放回原值。
+        // 必须在 su 可用之后做，失败也不影响下面的能力检测。
+        val legacyNote = runCatching { restoreLegacyGain() }.getOrDefault("")
 
-        val scanLog = StringBuilder()
-        val scan = if (tool != null) scanCards(tool, scanLog) else null
-        val best = scan?.best
-        cardIndex = best?.cardIndex ?: -1
-        val controls = best?.controls.orEmpty()
-        val targets = pickTargets(controls)
         val mono = readMono()
         val vendor = readVendorPackages()
         val disabled = readDisabledPackages()
@@ -143,45 +92,10 @@ class RootAudioManager private constructor(private val context: Context) {
         val diagnostic = buildString {
             appendLine("ROOT 诊断")
             appendLine("· su：$su")
-            appendLine("· 混音器工具：${tool ?: "未找到"}")
-            appendLine("· 声卡：${best?.let { "card ${it.cardIndex}（${it.name}）" } ?: "未识别"}")
-            appendLine("· 控制项总数：${controls.size}")
-            appendLine("· 匹配到的音量控制：${targets.size}")
-            targets.take(12).forEach { appendLine("   - ${it.describe()}") }
             appendLine("· 系统单声道：${if (mono) "开" else "关"}")
             appendLine("· 厂商音效包：${if (vendor.isEmpty()) "未发现" else vendor.joinToString()}")
-            val gainDb = prefs.getInt("gain_db", 0)
-            appendLine("· 硬件增益：${if (gainDb > 0) "+$gainDb dB（已交给守护进程维持）" else "未启用"}")
-            if (gainDb > 0) {
-                appendLine("· 守护偏移：${gainDb * UnitsPerDb} 档（${gainDb} dB）")
-            }
-            if (scanLog.isNotEmpty()) {
-                appendLine()
-                appendLine("声卡扫描：")
-                appendLine(scanLog.toString().trimEnd())
-            }
-            if (dumpTail.isNotEmpty()) {
-                appendLine()
-                appendLine("混音器原始输出（前 20 行）：")
-                appendLine(dumpTail)
-            }
-            if (tool == null) {
-                appendLine()
-                appendLine("未找到可用的 tinymix / amixer。")
-                appendLine("可以尝试：Magisk/KernelSU 模块里安装 tinymix，")
-                appendLine("或确认 /vendor/bin/tinymix 存在且可执行。")
-            } else if (controls.isEmpty()) {
-                appendLine()
-                appendLine("tinymix 存在但读不到控制项。")
-            } else if (targets.isEmpty()) {
-                appendLine()
-                appendLine("能读到控制项，但没有匹配到可写的输出音量控制。")
-                appendLine("请把下面这段「候选控制项」发给开发者，以便补充匹配规则：")
-                appendLine("──────")
-                controls.filter { it.type.equals("INT", true) }
-                    .take(60)
-                    .forEach { appendLine("${it.index}\t${it.name}\t${it.describe()}") }
-                appendLine("──────")
+            if (legacyNote.isNotEmpty()) {
+                appendLine("· 旧版硬件增益：$legacyNote")
             }
         }
 
@@ -189,281 +103,71 @@ class RootAudioManager private constructor(private val context: Context) {
             checking = false,
             available = true,
             suPath = su,
-            mixerTool = tool,
-            cardIndex = best?.cardIndex ?: -1,
-            cardName = best?.name,
-            controlCount = controls.size,
-            targets = targets,
-            appliedDb = prefs.getInt("gain_db", 0),
-            appliedDetail = prefs.getString("detail", null),
             mono = mono,
             vendorPackages = vendor,
             vendorBlocked = vendor.isNotEmpty() && vendor.all { it in disabled },
-            error = when {
-                tool == null -> "未找到 tinymix / amixer，无法读写硬件音量"
-                controls.isEmpty() -> "混音器读取失败"
-                targets.isEmpty() -> "没有找到可写的输出音量控制"
-                else -> null
-            },
             diagnostic = diagnostic,
         )
     }
 
-    /** 最近一次 dump 的尾部，供诊断展示。 */
-    private var dumpTail: String = ""
-
-    /** 一张声卡的扫描结果。 */
-    private class CardScan(
-        val cardIndex: Int,
-        val name: String,
-        val controls: List<MixerControl>,
-        val candidates: List<MixerControl>,
-    )
-
-    private class ScanResult(val best: CardScan?, val log: String)
+    // ── 旧版硬件增益的一次性清理 ──────────────────────────────────────────────
 
     /**
-     * 逐个声卡试 `tinymix -D n -a`，挑出真正带输出音量控制的那张。
+     * 把老版本写高的 codec 数字音量写回原值。
      *
-     * 这一步是必需的：小米这类机器上 card 0 往往是 `art-mtp-snd-card`（USB 音频回环），
-     * 真正的 codec 在 card 1 或更后面，直接用默认 card 0 只会读到一堆 TX/BOOL 控制。
+     * 1.3.7 及更早的版本提供过「硬件增益」：用 `tinymix` 直接抬高 codec 的
+     * 数字音量，并由 uid 0 守护进程每 1.2 秒维持偏移。这套能力已经删除，
+     * 守护进程也会被协议版本顶掉，但寄存器会停在抬高的状态，直到系统下一次
+     * 因为音量调节重写它 —— 用户不碰音量键就一直停在那儿。
+     *
+     * 所以升级后第一次启动时，用旧版本记录在偏好里的原始值写回去，然后清掉
+     * 那几个键；偏好清空后本方法自然不再有活干。
+     *
+     * @return 给诊断看的一行说明；没有旧数据时返回空串。
      */
-    private suspend fun scanCards(tool: String, log: StringBuilder): ScanResult {
-        val names = readCardNames()
-        var best: CardScan? = null
-        var bestScore = 0
+    private suspend fun restoreLegacyGain(): String {
+        val raw = prefs.getString("originals", null)
+        val gainDb = prefs.getInt("gain_db", 0)
+        prefs.edit().remove("gain_db").remove("detail").remove("originals").apply()
+        if (raw.isNullOrBlank()) return ""
+        val originals = runCatching {
+            val json = JSONObject(raw)
+            buildMap {
+                json.keys().forEach { key -> put(key, json.optInt(key)) }
+            }
+        }.getOrDefault(emptyMap())
+        if (originals.isEmpty()) return ""
 
+        val tool = findTinymix() ?: return "未找到 tinymix，codec 音量需重启后自动恢复"
+        val pending = originals.toMutableMap()
         for (card in 0 until MaxCardScan) {
-            val r = RootShell.exec("$tool -D $card -a 2>&1", 15_000L)
-            var out = r.output
-            if (out.isBlank()) continue
-            if (out.contains("Failed", ignoreCase = true) ||
-                out.contains("cannot open", ignoreCase = true) ||
-                out.contains("No such", ignoreCase = true)
-            ) {
-                log.appendLine("· card $card：打不开")
-                continue
+            val iterator = pending.entries.iterator()
+            while (iterator.hasNext()) {
+                val (name, value) = iterator.next()
+                val safe = name.replace("\"", "").replace("$", "").replace("`", "")
+                val r = RootShell.exec("$tool -D $card \"$safe\" $value 2>&1", 8_000L)
+                if (r.ok && !r.looksFailed) iterator.remove()
             }
-            var controls = MixerParser.parse(out)
-            // 老版本 tinymix 没有 -a（all-values），解析为空时退回不带 -a 的用法
-            if (controls.isEmpty()) {
-                out = RootShell.exec("$tool -D $card 2>&1", 15_000L).output
-                controls = MixerParser.parse(out)
-            }
-            if (controls.isEmpty()) {
-                log.appendLine("· card $card：${names[card] ?: "?"} · 解析到 0 项")
-                continue
-            }
-            val candidates = pickTargets(controls)
-            val name = MixerParser.mixerName(out) ?: names[card] ?: "unknown"
-            log.appendLine("· card $card：$name · ${controls.size} 项 · 音量候选 ${candidates.size}")
-            // 打分：有候选的优先，其次控制项多的优先
-            val score = candidates.size * 1000 + controls.size
-            if (candidates.isNotEmpty() && score > bestScore) {
-                bestScore = score
-                best = CardScan(card, name, controls, candidates)
-                dumpTail = out.lines().take(20).joinToString("\n")
-            } else if (best == null && controls.size > 0) {
-                // 先记一个「至少能读」的兜底，等更好的出现再替换
-                best = CardScan(card, name, controls, candidates)
-                dumpTail = out.lines().take(20).joinToString("\n")
-            }
+            if (pending.isEmpty()) break
         }
-        return ScanResult(best, log.toString())
-    }
-
-    /** 读 /proc/asound/cards，得到 card 编号 → 名字。 */
-    private suspend fun readCardNames(): Map<Int, String> {
-        val text = RootShell.read("cat /proc/asound/cards 2>/dev/null", 6_000L) ?: return emptyMap()
-        val map = LinkedHashMap<Int, String>()
-        val regex = Regex("""^\s*(\d+)\s+\[([^\]]*)\]:\s*(\S+)""")
-        for (line in text.lineSequence()) {
-            val m = regex.find(line) ?: continue
-            val idx = m.groupValues[1].toIntOrNull() ?: continue
-            map[idx] = m.groupValues[3]
+        val restored = originals.size - pending.size
+        return when {
+            pending.isEmpty() -> "已恢复 $restored 项原始值（升级前为 +${gainDb}dB）"
+            restored == 0 -> "恢复失败，codec 音量需重启后自动恢复"
+            else -> "已恢复 $restored/${originals.size} 项，其余需重启后自动恢复"
         }
-        return map
     }
 
-    /** 找可用的混音器工具；找到但打不开的（模拟器）视为不可用。 */
-    private suspend fun findMixerTool(): String? {
-        val tinymix = which("tinymix")
-        if (tinymix != null) return tinymix
-        val amixer = which("amixer")
-        if (amixer != null) return amixer
-        return null
-    }
-
-    private suspend fun which(name: String): String? {
+    /** 找 tinymix；找不到返回 null。 */
+    private suspend fun findTinymix(): String? {
         val r = RootShell.exec(
-            "command -v $name 2>/dev/null; " +
-                "ls /vendor/bin/$name /system/bin/$name /system/xbin/$name 2>/dev/null",
+            "command -v tinymix 2>/dev/null; " +
+                "ls /vendor/bin/tinymix /system/bin/tinymix /system/xbin/tinymix 2>/dev/null",
             6_000L,
         )
         return r.output.lineSequence()
             .map { it.trim() }
             .firstOrNull { it.startsWith("/") }
-    }
-
-    /** 从所有控制项里挑出「输出音量」，并且只挑**一级**。 */
-    private fun pickTargets(controls: List<MixerControl>): List<MixerControl> {
-        val candidates = controls.filter { control ->
-            val name = control.name
-            control.writable &&
-                name.contains("volume", ignoreCase = true) &&
-                !ExcludeRegex.containsMatchIn(name) &&
-                GainNameRegex.containsMatchIn(name)
-        }
-        if (candidates.isEmpty()) return emptyList()
-        // 有扬声器专用控制时只动扬声器，避免把耳机音量一起抬上去
-        val speakerOnly = candidates.filter {
-            val n = it.name.lowercase()
-            n.contains("speaker") || n.contains("spk") || n.contains("mono") ||
-                n.contains("wsa") || n.contains("aw8") || n.contains("tas25") || n.contains("cs35")
-        }
-        val pool = if (speakerOnly.isNotEmpty()) speakerOnly else candidates
-
-        // 同一条通路上串联着多级音量（真机实测：`RX_RX0 Digital Volume` 与
-        // `RX_RX0 Mix Digital Volume` 是串联的两级），两级一起抬会让实际增益
-        // 变成滑杆值的两倍。这里只保留一级：优先不带 Mix 的那一级。
-        val direct = pool.filterNot { it.name.contains("mix", ignoreCase = true) }
-        val stage = if (direct.isNotEmpty()) direct else pool
-
-        // 再按「去掉通道号后的名字」分组，只留通道覆盖最多的那一组，
-        // 避免把 Digital Volume 与 PA Volume 这类不同级的衰减器同时写。
-        val groups = stage.groupBy { stageKey(it.name) }
-        return groups.maxByOrNull { it.value.size }?.value ?: stage
-    }
-
-    /**
-     * 把一个控制项名字归一化成「通路阶段」，用于识别串联的重复级。
-     *
-     * `RX_RX0 Digital Volume` / `RX_RX1 Digital Volume` → `rx_rx digital volume`
-     */
-    private fun stageKey(name: String): String = name.lowercase()
-        .replace(Regex("""\d+"""), "")
-        .replace("mix", "")
-        .replace(Regex("""[\s_]+"""), " ")
-        .trim()
-
-    // ── 硬件增益 ────────────────────────────────────────────────────────────
-
-    /**
-     * 把硬件音量按 [db] 分贝整体抬高。
-     *
-     * 以「首次应用前的原始值」为基准，因此 6 → 12 dB 是重算而不是叠加，
-     * 反复拖动不会一路顶到芯片上限。
-     *
-     * 只写**一级**音量控制（见 [pickTargets]），所以 `db` 就是真实增益：
-     * 档位 × 0.5 dB/档 = db。若某一级被芯片上限截断，回写的
-     * [RootState.appliedDb] 是**实际达成**的值，不是滑杆值。
-     */
-    suspend fun applyGain(db: Int): Boolean = withContext(Dispatchers.IO) {
-        val tool = mixerTool
-        val card = cardIndex
-        val targets = _state.value.targets
-        if (tool == null || card < 0 || targets.isEmpty()) {
-            _state.value = _state.value.copy(error = "没有可写的硬件音量控制")
-            return@withContext false
-        }
-
-        val originals = loadOriginals()
-        val details = ArrayList<String>()
-        var success = 0
-        var achievedUnits = Int.MAX_VALUE
-
-        for (control in targets) {
-            val base = originals[control.name] ?: control.value ?: continue
-            if (!originals.containsKey(control.name)) originals[control.name] = base
-            val max = control.max ?: base
-            val min = control.min ?: 0
-            val target = (base + db * UnitsPerDb).coerceIn(min, max)
-            if (setControl(tool, card, control, target)) {
-                success++
-                achievedUnits = minOf(achievedUnits, target - base)
-                details += "${control.name} $base→$target"
-            }
-        }
-
-        if (success == 0) {
-            _state.value = _state.value.copy(error = "写入硬件音量失败")
-            return@withContext false
-        }
-
-        // 实际达成的 dB：被上限截断时如实反映，UI 不再显示做不到的数字
-        val achievedDb = if (achievedUnits == Int.MAX_VALUE) {
-            0
-        } else {
-            (achievedUnits.toFloat() / UnitsPerDb).roundToInt().coerceAtLeast(0)
-        }
-
-        saveOriginals(originals)
-        // 交给守护进程维持偏移：系统音量一变就会重写这些寄存器，
-        // 由 uid 0 的守护进程每秒补回来，用户调音量依然有效。
-        daemonClient.writeMixer(tool, card, achievedDb * UnitsPerDb, targets, originals)
-        prefs.edit().putInt("gain_db", achievedDb)
-            .putString("detail", details.joinToString("；")).apply()
-        _state.value = _state.value.copy(
-            appliedDb = achievedDb,
-            appliedDetail = details.joinToString("；"),
-            error = null,
-        )
-        true
-    }
-
-    /** 恢复到第一次应用前的原始值。 */
-    suspend fun restore(): Boolean = withContext(Dispatchers.IO) {
-        val tool = mixerTool
-        val card = cardIndex
-        val originals = loadOriginals()
-        // 先停掉守护，否则刚恢复完又会被补回偏移
-        daemonClient.clearMixer()
-        if (tool == null || card < 0 || originals.isEmpty()) {
-            prefs.edit().remove("gain_db").remove("detail").remove("originals").apply()
-            _state.value = _state.value.copy(appliedDb = 0, appliedDetail = null)
-            return@withContext true
-        }
-        var success = 0
-        for (control in _state.value.targets) {
-            val original = originals[control.name] ?: continue
-            if (setControl(tool, card, control, original)) success++
-        }
-        prefs.edit().remove("gain_db").remove("detail").remove("originals").apply()
-        _state.value = _state.value.copy(
-            appliedDb = 0,
-            appliedDetail = null,
-            error = if (success == 0) "恢复原始值失败" else null,
-        )
-        success > 0 || originals.isEmpty()
-    }
-
-    private suspend fun setControl(
-        tool: String,
-        card: Int,
-        control: MixerControl,
-        value: Int,
-    ): Boolean {
-        val safeName = control.name.replace("\"", "").replace("$", "").replace("`", "")
-        val byName = RootShell.exec("$tool -D $card \"$safeName\" $value 2>&1", 8_000L)
-        if (byName.ok && !byName.looksFailed) return true
-        val byIndex = RootShell.exec("$tool -D $card ${control.index} $value 2>&1", 8_000L)
-        return byIndex.ok && !byIndex.looksFailed
-    }
-
-    private fun loadOriginals(): MutableMap<String, Int> {
-        val raw = prefs.getString("originals", null) ?: return mutableMapOf()
-        return runCatching {
-            val json = JSONObject(raw)
-            val map = mutableMapOf<String, Int>()
-            json.keys().forEach { key -> map[key] = json.optInt(key) }
-            map
-        }.getOrDefault(mutableMapOf())
-    }
-
-    private fun saveOriginals(values: Map<String, Int>) {
-        val json = JSONObject()
-        values.forEach { (key, value) -> json.put(key, value) }
-        prefs.edit().putString("originals", json.toString()).apply()
     }
 
     // ── 系统单声道 ──────────────────────────────────────────────────────────

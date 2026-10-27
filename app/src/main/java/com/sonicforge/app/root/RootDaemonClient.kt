@@ -62,8 +62,7 @@ class RootDaemonClient(private val context: Context) {
     /**
      * 写音效配置。文件很小，直接同步写即可。
      *
-     * 只替换音效那几行，保留 `mixer_*` 行 —— 硬件增益的守护由
-     * [writeMixer] 独立维护，两边互不覆盖。
+     * 每次重写整份文件：配置项就是这几行，没有别的写入方。
      */
     fun writeConfig(
         active: Boolean,
@@ -73,63 +72,17 @@ class RootDaemonClient(private val context: Context) {
         boostMin: Int = 0,
         leveler: Int = 0,
     ) {
-        updateLines { lines ->
-            lines.removeAll { keyOf(it) in EffectKeys }
-            lines += "active=${if (active) 1 else 0}"
-            lines += "boost=$boost"
-            lines += "boost_min=$boostMin"
-            lines += "eq=${eq.joinToString(",")}"
-            lines += "bass=$bass"
-            lines += "leveler=$leveler"
-        }
-    }
-
-    /**
-     * 写硬件音量守护配置，交给守护进程维持「系统音量变化后自动补回偏移」。
-     *
-     * 传 `offsetUnits = 0` 或空列表即可关闭守护。
-     */
-    fun writeMixer(
-        tool: String?,
-        card: Int,
-        offsetUnits: Int,
-        targets: List<MixerControl>,
-        bases: Map<String, Int>,
-    ) {
-        updateLines { lines ->
-            lines.removeAll { keyOf(it) in MixerKeys }
-            if (tool != null && offsetUnits > 0 && targets.isNotEmpty()) {
-                lines += "mixer_tool=$tool"
-                lines += "mixer_card=$card"
-                lines += "mixer_offset=$offsetUnits"
-                lines += "mixer_names=" + targets.joinToString(";") { control ->
-                    val base = bases[control.name] ?: control.value ?: 0
-                    "${control.name}|$base|${control.min ?: 0}|${control.max ?: 0}"
-                }
-            }
-        }
-    }
-
-    /** 关闭硬件音量守护。 */
-    fun clearMixer() {
-        updateLines { lines -> lines.removeAll { keyOf(it) in MixerKeys } }
-    }
-
-    private fun keyOf(line: String): String {
-        val idx = line.indexOf('=')
-        return if (idx <= 0) "" else line.substring(0, idx).trim()
-    }
-
-    /** 读—改—写 cmd 文件，保证两边写入不互相抹掉。 */
-    private fun updateLines(transform: (MutableList<String>) -> Unit) {
         runCatching {
-            val lines = cmdFile.takeIf { it.exists() }
-                ?.readLines()
-                ?.filter { it.isNotBlank() }
-                ?.toMutableList()
-                ?: mutableListOf()
-            transform(lines)
-            cmdFile.writeText(lines.joinToString("\n", postfix = "\n"))
+            cmdFile.writeText(
+                buildString {
+                    appendLine("active=${if (active) 1 else 0}")
+                    appendLine("boost=$boost")
+                    appendLine("boost_min=$boostMin")
+                    appendLine("eq=${eq.joinToString(",")}")
+                    appendLine("bass=$bass")
+                    appendLine("leveler=$leveler")
+                },
+            )
         }
     }
 
@@ -172,8 +125,13 @@ class RootDaemonClient(private val context: Context) {
 
     /** 停止守护进程并清理状态。 */
     suspend fun stop() = withContext(Dispatchers.IO) {
-        // 先写 active=0 让守护进程自己释放音效并退出，再兜底 pkill
-        runCatching { cmdFile.writeText("active=0\n") }
+        // 先写 active=0 让守护进程自己释放音效并退出，再兜底 pkill。
+        // 只改这一行，其余参数留着，下次开开关不用重新拖一遍。
+        runCatching {
+            val lines = cmdFile.takeIf { it.exists() }?.readLines().orEmpty()
+                .filter { it.isNotBlank() && !it.trimStart().startsWith("active=") }
+            cmdFile.writeText((lines + "active=0").joinToString("\n", postfix = "\n"))
+        }
         delay(600)
         RootShell.exec("pkill -f '$PROCESS_PATTERN'", 6_000L)
         // 保留 cmd 文件，App 重启后还能读回上次的增益数值
@@ -307,13 +265,7 @@ class RootDaemonClient(private val context: Context) {
          * 守护进程状态文件里新增字段时，两个数字一起 +1，
          * 这样老进程会被自动杀掉重拉，不会再出现「新 APK 跑旧代码」。
          */
-        const val DAEMON_PROTOCOL_VERSION = 4
-
-        /** 音效链那几行的 key。 */
-        private val EffectKeys = setOf("active", "boost", "boost_min", "eq", "bass", "leveler")
-
-        /** 硬件音量守护那几行的 key。 */
-        private val MixerKeys = setOf("mixer_tool", "mixer_card", "mixer_offset", "mixer_names")
+        const val DAEMON_PROTOCOL_VERSION = 5
 
         /**
          * 用于 pgrep/pkill 的模式。

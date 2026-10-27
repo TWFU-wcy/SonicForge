@@ -83,9 +83,7 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.scale
-import com.sonicforge.app.root.RootAudioManager
 import com.sonicforge.app.root.RootState
-import kotlin.math.roundToInt
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
@@ -243,8 +241,6 @@ fun SonicForgeApp(
     onDiagnose: () -> String,
     root: RootState = RootState(checking = false),
     onRootRefresh: () -> Unit = {},
-    onRootGainChange: (Int) -> Unit = {},
-    onRootRestore: () -> Unit = {},
     onRootVendorChange: (Boolean) -> Unit = {},
 ) {
     var tab by remember { mutableStateOf(Tab.HOME) }
@@ -314,8 +310,6 @@ fun SonicForgeApp(
                                 onDiagnose = onDiagnose,
                                 root = root,
                                 onRootRefresh = onRootRefresh,
-                                onRootGainChange = onRootGainChange,
-                                onRootRestore = onRootRestore,
                                 onRootVendorChange = onRootVendorChange,
                             )
                         }
@@ -494,7 +488,7 @@ private fun HomePage(
             subtitle = when {
                 state.pausedForHeadset -> "已连接${state.routeLabel} · 增强已暂停"
                 state.routedToBluetooth -> "已连接蓝牙输出"
-                root.available -> "ROOT 已授权 · 硬件增益可用"
+                root.available -> "ROOT 已授权 · 全局音效可用"
                 else -> "需要 ROOT 才能开启"
             },
         )
@@ -552,7 +546,7 @@ private fun HomePage(
                 if (state.pausedForHeadset) {
                     StatusPill(active = false, text = "耳机输出 · 已暂停")
                 } else if (state.active) {
-                    ActiveInfoRow(state = state, preset = preset, hwGainDb = root.appliedDb)
+                    ActiveInfoRow(state = state, preset = preset)
                 } else {
                     StatusPill(active = false)
                 }
@@ -836,9 +830,8 @@ private fun CustomPresetRow(
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ActiveInfoRow(state: AudioState, preset: Preset, hwGainDb: Int = 0) {
+private fun ActiveInfoRow(state: AudioState, preset: Preset) {
     val chips = buildList {
-        if (hwGainDb > 0) add("硬件 +${hwGainDb}dB")
         if (state.mode == EngineMode.ROOT) add("ROOT 全局音效")
         add("低音 ${state.bassBoostStrength / 10}%")
         if (state.levelerStrength > 0) add("响度均衡 ${state.levelerStrength / 10}%")
@@ -1137,8 +1130,6 @@ private fun SettingsPage(
     onDiagnose: () -> String,
     root: RootState = RootState(checking = false),
     onRootRefresh: () -> Unit = {},
-    onRootGainChange: (Int) -> Unit = {},
-    onRootRestore: () -> Unit = {},
     onRootVendorChange: (Boolean) -> Unit = {},
 ) {
     var diagnoseText by remember { mutableStateOf<String?>(null) }
@@ -1155,8 +1146,6 @@ private fun SettingsPage(
         RootSection(
             root = root,
             onRefresh = onRootRefresh,
-            onGainChange = onRootGainChange,
-            onRestore = onRootRestore,
             onVendorChange = onRootVendorChange,
         )
 
@@ -1341,15 +1330,13 @@ private fun InfoRow(label: String, value: String) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ROOT 硬件增强
+// ROOT 能力
 // ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
 private fun RootSection(
     root: RootState,
     onRefresh: () -> Unit,
-    onGainChange: (Int) -> Unit,
-    onRestore: () -> Unit,
     onVendorChange: (Boolean) -> Unit,
 ) {
     PaddedGlassCard(
@@ -1404,52 +1391,11 @@ private fun RootSection(
             )
             TextButton(onClick = onRefresh) { Text("重新检测") }
         } else {
-            val hasMixer = root.mixerTool != null && root.targets.isNotEmpty()
-            if (hasMixer) {
-                var pending by remember(root.appliedDb) {
-                    mutableStateOf(root.appliedDb.toFloat())
-                }
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = "硬件增益",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text(
-                        text = "+${pending.roundToInt()} dB",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
-                Slider(
-                    value = pending,
-                    onValueChange = { pending = it },
-                    onValueChangeFinished = { onGainChange(pending.roundToInt()) },
-                    valueRange = 0f..RootAudioManager.MaxGainDb.toFloat(),
-                    steps = RootAudioManager.MaxGainDb - 1,
-                )
-                Text(
-                    text = if (root.appliedDb > 0) {
-                        "已提升音频芯片的输出电平\n调系统音量时这段增强会保持"
-                    } else {
-                        "直接提升音频芯片的输出电平，突破系统音量上限\n调系统音量时这段增强会保持"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                if (root.appliedDb > 0) {
-                    TextButton(onClick = onRestore) { Text("恢复原始值") }
-                }
-            } else {
-                Text(
-                    text = "这台设备没有可调的硬件音量控制，增强开关仍然可用。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                TextButton(onClick = onRefresh) { Text("重新检测") }
-            }
+            Text(
+                text = "音量增强全部由守护进程在系统混音链上完成，不需要改动音频芯片。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
             if (root.vendorPackages.isNotEmpty()) {
                 Spacer(Modifier.height(6.dp))

@@ -111,8 +111,6 @@ class MainActivity : ComponentActivity() {
                     },
                     root = rootState,
                     onRootRefresh = { lifecycleScope.launch { rootManager.refresh() } },
-                    onRootGainChange = { db -> lifecycleScope.launch { rootManager.applyGain(db) } },
-                    onRootRestore = { lifecycleScope.launch { rootManager.restore() } },
                     onRootVendorChange = { blocked ->
                         lifecycleScope.launch { rootManager.setVendorBlocked(blocked) }
                     },

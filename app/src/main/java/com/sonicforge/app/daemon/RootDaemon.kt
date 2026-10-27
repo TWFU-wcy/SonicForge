@@ -51,7 +51,7 @@ object RootDaemon {
      *
      * 只要状态文件里新增/改动了字段，这个数字就要 +1。
      */
-    private const val ProtocolVersion = 4
+    private const val ProtocolVersion = 5
 
     /** 三段的分频点（Hz），也是每段的截止频率。 */
     private val MbcCutoffs = floatArrayOf(200f, 2000f, 20000f)
@@ -90,8 +90,6 @@ object RootDaemon {
         var lastConfig = ""
         var lastBeat = 0L
         var missingSince = 0L
-        var keeper: MixerKeeper? = null
-        var lastMixerTick = 0L
         // 记住当前生效的配置，路由变化时用它重建音效链
         var activeConfig: DaemonConfig? = null
         // App 下发的原始配置（含增益上限），系统音量变化时用它折算
@@ -118,7 +116,6 @@ object RootDaemon {
                 // 配置文件被删掉（App 被卸载/清理）：不能让音效无限期挂着
                 if (missingSince == 0L) missingSince = System.currentTimeMillis()
                 if (System.currentTimeMillis() - missingSince > 5_000L) {
-                    runCatching { keeper?.restore() }
                     chain.release()
                     writeStatus(statusFile, chain, "配置已消失", route, paused)
                     Log.i(TAG, "配置文件已消失，退出")
@@ -130,9 +127,6 @@ object RootDaemon {
                     lastConfig = text
                     val cfg = DaemonConfig.parse(text)
                     if (!cfg.active) {
-                        // 关闭增强时把硬件音量放回原始值：
-                        // 关掉就该是真的关掉，不能留下「静悄悄还更响」的状态。
-                        runCatching { keeper?.restore() }
                         chain.release()
                         writeStatus(statusFile, chain, "已关闭", route, paused)
                         Log.i(TAG, "收到关闭指令，退出")
@@ -155,16 +149,15 @@ object RootDaemon {
                             TAG,
                             "应用配置 boost=${applied.boost} bass=${applied.bass} " +
                                 "leveler=${applied.leveler} mode=${chain.mode} " +
-                                "mbc=${chain.mbcAvailable} mixer=${applied.mixerTargets.size} err=$error",
+                                "mbc=${chain.mbcAvailable} err=$error",
                         )
                     } else {
-                        // 非扬声器输出：不建链、不写硬件音量
+                        // 非扬声器输出：不建链
                         paused = true
                         writeStatus(statusFile, chain, null, route, paused)
                         Log.i(TAG, "当前输出为 ${route.label}，暂停所有处理")
                     }
                     lastBeat = System.currentTimeMillis()
-                    keeper = if (route.speakerOnly) applied.buildKeeper() else null
                 }
             }
 
@@ -177,16 +170,13 @@ object RootDaemon {
                     val cfg = activeConfig
                     if (cfg != null && cfg.active) {
                         if (route.speakerOnly) {
-                            // 回到外放：重新建链、恢复硬件偏移
+                            // 回到外放：重新建链
                             val error = chain.apply(cfg)
-                            keeper = cfg.buildKeeper()
                             paused = false
                             writeStatus(statusFile, chain, error, route, paused)
                             Log.i(TAG, "输出切回 ${route.label}，恢复处理 mode=${chain.mode} err=$error")
                         } else {
-                            // 切到耳机/蓝牙：释放整条链，减掉硬件偏移
-                            runCatching { keeper?.restore() }
-                            keeper = null
+                            // 切到耳机/蓝牙：释放整条链
                             chain.release()
                             paused = true
                             writeStatus(statusFile, chain, null, route, paused)
@@ -219,15 +209,6 @@ object RootDaemon {
                     }
                     lastBeat = System.currentTimeMillis()
                 }
-            }
-            // 硬件音量守护：系统音量一动，AudioService 会重写 codec 的数字音量，
-            // 把我们的偏移冲掉。这里周期性读回当前值，发现被改了就重新补上偏移，
-            // 同时保留用户自己的音量变化（以当前值为新基准，只加偏移）。
-            val k = keeper
-            if (k != null && System.currentTimeMillis() - lastMixerTick > 1_200L) {
-                lastMixerTick = System.currentTimeMillis()
-                runCatching { k.tick() }
-                    .onFailure { Log.w(TAG, "硬件音量守护异常: ${it.message}") }
             }
             if (System.currentTimeMillis() - lastBeat > 2_000L) {
                 // 心跳：App 靠 status 里的 ts 判断守护进程是否还活着（不需要 su）
@@ -489,20 +470,7 @@ object RootDaemon {
         val boostMin: Int = 0,
         /** 响度均衡强度 0..1000，0 = 关闭。 */
         val leveler: Int = 0,
-        /** tinymix 路径，null 表示不守护硬件音量。 */
-        val mixerTool: String? = null,
-        val mixerCard: Int = 0,
-        /** 相对「用户系统音量」的偏移，单位是 codec 档位（0.5 dB/档）。 */
-        val mixerOffset: Int = 0,
-        val mixerTargets: List<MixerTarget> = emptyList(),
     ) {
-        /** 只有真正配了工具和控件才创建守护。 */
-        fun buildKeeper(): MixerKeeper? {
-            val tool = mixerTool ?: return null
-            if (mixerOffset <= 0 || mixerTargets.isEmpty()) return null
-            return MixerKeeper(tool, mixerCard, mixerOffset, mixerTargets)
-        }
-
         /**
          * 按系统音量折算出一份实际要下发的配置。
          *
@@ -517,10 +485,7 @@ object RootDaemon {
             val effBoost = Preset.effectiveBoostMillibel(max, min, volume, maxVolume)
             val effBass = Preset.effectiveBass(bass, volume, maxVolume)
             if (effBoost == boost && effBass == bass) return this
-            return DaemonConfig(
-                active, effBoost, eq, effBass, boostMin, leveler,
-                mixerTool, mixerCard, mixerOffset, mixerTargets,
-            )
+            return DaemonConfig(active, effBoost, eq, effBass, boostMin, leveler)
         }
 
         companion object {
@@ -531,10 +496,6 @@ object RootDaemon {
                 var boostMin = 0
                 var leveler = 0
                 var eq = IntArray(0)
-                var mixerTool: String? = null
-                var mixerCard = 0
-                var mixerOffset = 0
-                var mixerTargets = emptyList<MixerTarget>()
                 text.lineSequence().forEach { line ->
                     val idx = line.indexOf('=')
                     if (idx <= 0) return@forEach
@@ -549,131 +510,9 @@ object RootDaemon {
                         "eq" -> eq = value.split(',')
                             .mapNotNull { it.trim().toIntOrNull() }
                             .toIntArray()
-                        "mixer_tool" -> mixerTool = value.ifBlank { null }
-                        "mixer_card" -> mixerCard = value.toIntOrNull() ?: 0
-                        "mixer_offset" -> mixerOffset = value.toIntOrNull() ?: 0
-                        "mixer_names" -> mixerTargets = value.split(';')
-                            .mapNotNull { MixerTarget.parse(it.trim()) }
                     }
                 }
-                return DaemonConfig(
-                    active, boost, eq, bass, boostMin, leveler,
-                    mixerTool, mixerCard, mixerOffset, mixerTargets,
-                )
-            }
-        }
-    }
-
-    /** 一个要守护的 codec 音量控制：`名字|基准值|最小|最大`。 */
-    private class MixerTarget(
-        val name: String,
-        val base: Int,
-        val min: Int,
-        val max: Int,
-    ) {
-        companion object {
-            fun parse(text: String): MixerTarget? {
-                val parts = text.split('|')
-                if (parts.size != 4) return null
-                val name = parts[0].trim()
-                if (name.isEmpty()) return null
-                return MixerTarget(
-                    name,
-                    parts[1].trim().toIntOrNull() ?: return null,
-                    parts[2].trim().toIntOrNull() ?: 0,
-                    parts[3].trim().toIntOrNull() ?: return null,
-                )
-            }
-        }
-    }
-
-    /**
-     * 硬件音量守护。
-     *
-     * 系统音量一变，AudioService 就会重写 codec 的数字音量寄存器，
-     * 把 App 加上的偏移冲掉。这里每 1.2 秒读一次当前值：
-     *
-     * - 当前值 == 我们上次写的值 → 没人动过，什么都不做；
-     * - 当前值变了 → 以**当前值**为新基准，重新加上固定偏移。
-     *
-     * 这样用户调系统音量依然有效（整体比原生更响），而系统把值重写回原生时
-     * 偏移会被自动补回来，不会出现「调一下音量增强就没了」。
-     */
-    private class MixerKeeper(
-        private val tool: String,
-        private val card: Int,
-        private val offset: Int,
-        private val targets: List<MixerTarget>,
-    ) {
-        /** 上一次观察到的值（可能是系统写的，也可能是我们写的）。 */
-        private val lastSeen = HashMap<String, Int>()
-
-        /**
-         * 第一轮只记录现状、不写入。
-         *
-         * App 在写这份配置之前已经自己把偏移写进 codec 了，所以启动时看到的值
-         * 就是「已含偏移」的状态。若这里假设「当前值 = 基准」再补一次偏移，
-         * 就会翻倍；若假设「当前值 = 基准 + 偏移」又会在用户已经调过音量的
-         * 情况下算错。直接以观测值为起点最安全。
-         */
-        private var primed = false
-
-        fun tick() {
-            val current = readCurrent() ?: return
-            if (!primed) {
-                for (target in targets) {
-                    current[target.name]?.let { lastSeen[target.name] = it }
-                }
-                primed = true
-                return
-            }
-            for (target in targets) {
-                val now = current[target.name] ?: continue
-                val last = lastSeen[target.name]
-                if (last != null && now == last) continue // 没人动过
-                // 值变了：系统音量被调节，以当前值为基准重新加上偏移
-                lastSeen[target.name] = now
-                val wanted = (now + offset).coerceIn(target.min, target.max)
-                if (wanted != now) write(target, wanted)
-            }
-        }
-
-        /** 读一次全部控制项的当前值。 */
-        private fun readCurrent(): Map<String, Int>? = runCatching {
-            val process = ProcessBuilder(tool, "-D", card.toString())
-                .redirectErrorStream(true)
-                .start()
-            val out = process.inputStream.bufferedReader().readText()
-            process.waitFor()
-            if (out.isBlank()) null else MixerSnapshot.parse(out)
-        }.getOrNull()
-
-        private fun write(target: MixerTarget, value: Int) {
-            val safe = target.name.replace("\"", "").replace("$", "").replace("`", "")
-            val ok = runCatching {
-                val process = ProcessBuilder(tool, "-D", card.toString(), safe, value.toString())
-                    .redirectErrorStream(true)
-                    .start()
-                val out = process.inputStream.bufferedReader().readText()
-                process.waitFor()
-                !out.contains("Failed", ignoreCase = true) &&
-                    !out.contains("error", ignoreCase = true)
-            }.getOrDefault(false)
-            if (ok) lastSeen[target.name] = value
-        }
-
-        /**
-         * 守护结束时把偏移**减掉**，而不是写回原始值。
-         *
-         * 写回 `base` 会把用户后来的音量调节也一起抹掉（比如用户已经把音量
-         * 调到 30%，一关增强又跳回 67%）；减掉偏移则正好回到用户自己设定的档位。
-         */
-        fun restore() {
-            val current = readCurrent() ?: return
-            for (target in targets) {
-                val now = current[target.name] ?: continue
-                val wanted = (now - offset).coerceIn(target.min, target.max)
-                if (wanted != now) write(target, wanted)
+                return DaemonConfig(active, boost, eq, bass, boostMin, leveler)
             }
         }
     }
@@ -766,40 +605,6 @@ object RootDaemon {
             val max = match.groupValues[3].toIntOrNull() ?: return -1 to 15
             if (max <= 0) return -1 to 15
             return current.coerceIn(0, max) to max
-        }
-    }
-
-    /** 从 tinymix 输出里抠出「名字 → 当前值」。 */
-    private object MixerSnapshot {
-        private val IntLine = Regex("""^\s*(\d+)\s+INT\s+(\d+)\s+(.*)$""")
-        private val RangeSuffix = Regex("""\s*\(?range\s*(-?\d+)\s*->\s*(-?\d+)\)?\s*$""")
-        private val Separator = Regex("""\t+|\s{2,}""")
-        private val IntRegex = Regex("""-?\d+""")
-
-        fun parse(text: String): Map<String, Int> {
-            val map = HashMap<String, Int>()
-            for (line in text.lineSequence()) {
-                val head = IntLine.find(line) ?: continue
-                var rest = head.groupValues[3].trimEnd()
-                val range = RangeSuffix.find(rest)
-                if (range != null) rest = rest.removeRange(range.range).trimEnd()
-                val name: String
-                val rawValue: String
-                if (rest.startsWith("\"")) {
-                    val close = rest.indexOf('"', 1)
-                    if (close < 0) continue
-                    name = rest.substring(1, close).trim()
-                    rawValue = rest.substring(close + 1).trim()
-                } else {
-                    val sep = Separator.findAll(rest).lastOrNull() ?: continue
-                    name = rest.substring(0, sep.range.first).trim()
-                    rawValue = rest.substring(sep.range.last + 1).trim()
-                }
-                if (name.isEmpty()) continue
-                val value = IntRegex.find(rawValue)?.value?.toIntOrNull() ?: continue
-                map[name] = value
-            }
-            return map
         }
     }
 }
