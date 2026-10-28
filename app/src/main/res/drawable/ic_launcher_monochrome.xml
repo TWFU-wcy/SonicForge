@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SonicForge 图标前景：5 根圆头音柱（均衡波形），居中于 108dp 画布的安全区内 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M28.73,36.18 H28.73 A3.89,3.89 0 0 1 32.62,40.07 V67.93 A3.89,3.89 0 0 1 28.73,71.82 H28.73 A3.89,3.89 0 0 1 24.84,67.93 V40.07 A3.89,3.89 0 0 1 28.73,36.18 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M41.36,28.73 H41.36 A3.89,3.89 0 0 1 45.25,32.62 V75.38 A3.89,3.89 0 0 1 41.36,79.27 H41.36 A3.89,3.89 0 0 1 37.48,75.38 V32.62 A3.89,3.89 0 0 1 41.36,28.73 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54.00,21.60 H54.00 A3.89,3.89 0 0 1 57.89,25.49 V82.51 A3.89,3.89 0 0 1 54.00,86.40 H54.00 A3.89,3.89 0 0 1 50.11,82.51 V25.49 A3.89,3.89 0 0 1 54.00,21.60 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M66.64,28.73 H66.64 A3.89,3.89 0 0 1 70.52,32.62 V75.38 A3.89,3.89 0 0 1 66.64,79.27 H66.64 A3.89,3.89 0 0 1 62.75,75.38 V32.62 A3.89,3.89 0 0 1 66.64,28.73 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M79.27,36.18 H79.27 A3.89,3.89 0 0 1 83.16,40.07 V67.93 A3.89,3.89 0 0 1 79.27,71.82 H79.27 A3.89,3.89 0 0 1 75.38,67.93 V40.07 A3.89,3.89 0 0 1 79.27,36.18 Z" />
+</vector>
