@@ -69,12 +69,6 @@ data class AudioState(
     val routeLabel: String = "扬声器",
     /** 是否因为输出到耳机/蓝牙而自动暂停了全部处理。 */
     val pausedForHeadset: Boolean = false,
-    /**
-     * 音效链当前是否处于「中性」状态：没有媒体播放，或通知/铃声/闹钟正在响。
-     *
-     * 界面上要说清楚这是**正常现象**，否则用户看到「增强开着但没在放大」会以为坏了。
-     */
-    val idleNeutral: Boolean = false,
     /** 当前模式下允许的最大增益，UI 用它限制滑块。 */
     val maxBoostMillibel: Int = Preset.MaxSliderBoostMillibel,
 ) {
@@ -191,7 +185,6 @@ class AudioEngine(context: Context) {
             levelerAvailable = status.mbcAvailable,
             routeLabel = status.route.takeIf { it.isNotBlank() } ?: routeLabel(),
             pausedForHeadset = status.paused,
-            idleNeutral = status.bypass,
             error = null,
         )
         Log.i(TAG, "已接管运行中的 ROOT 守护进程 pid=${status.pid} mode=${status.mode} boost=${cfg?.boost}")
@@ -429,7 +422,6 @@ class AudioEngine(context: Context) {
             routedToBluetooth = isBluetoothA2dpOn(),
             routeLabel = status?.route?.takeIf { it.isNotBlank() } ?: routeLabel(),
             pausedForHeadset = status?.paused ?: _state.value.pausedForHeadset,
-            idleNeutral = status?.bypass ?: _state.value.idleNeutral,
             mono = readSystemMono(),
             systemVolume = volume.first,
             maxSystemVolume = volume.second,
@@ -471,7 +463,6 @@ class AudioEngine(context: Context) {
             appendLine("守护进程运行中：${status?.isAlive() == true}")
             appendLine("守护进程模式：${status?.mode ?: "NONE"}")
             appendLine("守护进程输出路由：${status?.route ?: "（未知）"}（耳机暂停：${status?.paused == true}）")
-            appendLine("当前是否中性（无媒体播放/提示音在响）：${status?.bypass == true}")
             appendLine("多段压缩（MBC）：${if (status?.mbcAvailable == true) "可用" else "不可用"}")
             appendLine("日志尾部：")
             appendLine(client.logTail(15).ifBlank { "（空）" })
@@ -597,7 +588,6 @@ class AudioEngine(context: Context) {
             levelerAvailable = status.mbcAvailable,
             routeLabel = status.route.takeIf { it.isNotBlank() } ?: _state.value.routeLabel,
             pausedForHeadset = status.paused,
-            idleNeutral = status.bypass,
             error = null,
         )
         Log.i(

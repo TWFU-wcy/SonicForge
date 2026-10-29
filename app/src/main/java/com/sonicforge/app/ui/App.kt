@@ -488,7 +488,6 @@ private fun HomePage(
             title = "SonicForge",
             subtitle = when {
                 state.pausedForHeadset -> "已连接${state.routeLabel} · 增强已暂停"
-                state.active && state.idleNeutral -> "无媒体播放 · 音效待机，媒体一响自动增强"
                 state.routedToBluetooth -> "已连接蓝牙输出"
                 root.available -> "ROOT 已授权 · 全局音效可用"
                 else -> "需要 ROOT 才能开启"
@@ -555,10 +554,6 @@ private fun HomePage(
                 Spacer(Modifier.height(14.dp))
                 if (state.pausedForHeadset) {
                     StatusPill(active = false, text = "耳机输出 · 已暂停")
-                } else if (state.active && state.idleNeutral) {
-                    // 没有媒体播放时链路是直通的：通知/提示音保持原声，
-                    // 这既解释了「为什么现在没在放大」，也说明不是坏了
-                    StatusPill(active = false, text = "待机 · 仅在媒体播放时增强")
                 } else if (state.active) {
                     ActiveInfoRow(state = state, preset = preset)
                 } else {
@@ -625,7 +620,6 @@ private fun HomePage(
                     )
                     Text(
                         text = if (state.pausedForHeadset) "耳机输出时不处理，拔出后自动恢复"
-                        else if (state.active && state.idleNeutral) "媒体播放时自动增强，通知音保持原声"
                         else if (state.active) "正在实时处理系统音频" else "打开后立即生效",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
