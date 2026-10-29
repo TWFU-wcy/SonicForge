@@ -22,6 +22,13 @@ data class DaemonStatus(
     val route: String = "",
     /** 是否因为输出到耳机/蓝牙而暂停了全部处理。 */
     val paused: Boolean = false,
+    /**
+     * 音效链当前是否处于「中性」状态（增益 0 dB、EQ 全平、低音与响度均衡关闭）。
+     *
+     * 没有媒体播放、或者通知/铃声/闹钟正在响的时候都会是中性的：
+     * 这些声音不该被增强，否则通知音会被推大，开着音频触感的机型上就是震动变强。
+     */
+    val bypass: Boolean = false,
     /** 守护进程写这份状态时用的协议版本；0 表示老版本（没有这个字段）。 */
     val protocolVersion: Int = 0,
 ) {
@@ -200,6 +207,7 @@ class RootDaemonClient(private val context: Context) {
         var mbc = false
         var route = ""
         var paused = false
+        var bypass = false
         var protocolVersion = 0
         text.lineSequence().forEach { line ->
             val idx = line.indexOf('=')
@@ -214,12 +222,13 @@ class RootDaemonClient(private val context: Context) {
                 "mbc" -> mbc = value == "1"
                 "route" -> route = value
                 "paused" -> paused = value == "1"
+                "bypass" -> bypass = value == "1"
                 "pv" -> protocolVersion = value.toIntOrNull() ?: 0
                 "error" -> error = value.ifBlank { null }
                 "ts" -> ts = value.toLongOrNull() ?: 0L
             }
         }
-        return DaemonStatus(ok, mode, pid, freqs, error, ts, mbc, route, paused, protocolVersion)
+        return DaemonStatus(ok, mode, pid, freqs, error, ts, mbc, route, paused, bypass, protocolVersion)
     }
 
     /** 读回当前生效的配置（App 自己写的 cmd 文件，重启后靠它恢复界面数值）。 */
@@ -265,7 +274,7 @@ class RootDaemonClient(private val context: Context) {
          * 守护进程状态文件里新增字段时，两个数字一起 +1，
          * 这样老进程会被自动杀掉重拉，不会再出现「新 APK 跑旧代码」。
          */
-        const val DAEMON_PROTOCOL_VERSION = 5
+        const val DAEMON_PROTOCOL_VERSION = 6
 
         /**
          * 用于 pgrep/pkill 的模式。

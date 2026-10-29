@@ -52,7 +52,7 @@ object RootDaemon {
      *
      * 只要状态文件里新增/改动了字段，这个数字就要 +1。
      */
-    private const val ProtocolVersion = 5
+    private const val ProtocolVersion = 6
 
     /** 三段的分频点（Hz），也是每段的截止频率。 */
     private val MbcCutoffs = floatArrayOf(200f, 2000f, 20000f)
@@ -62,6 +62,25 @@ object RootDaemon {
 
     /** 多久读一次系统媒体音量（毫秒）。音量键按住不放时会连发，1.2 秒够跟手。 */
     private const val VolumePollMs = 1_200L
+
+    /**
+     * 多久扫一次「现在到底在播什么」（毫秒）。
+     *
+     * 这个值不决定通知音会不会被增强 —— 没有媒体播放时链路本来就是中性，
+     * 通知从第一个采样起就是原声。它只影响两件事：
+     * 媒体开始播放后多久增强跟上、媒体播放中途来通知时多久让路。
+     * 都一秒内，听感上察觉不到；扫得越勤 `dumpsys audio` 的开销越大。
+     */
+    private const val PlayerPollMs = 1_000L
+
+    /** 单次扫描最多读多少行，防止某些机型 dump 特别长时把主循环拖住。 */
+    private const val PlayerScanMaxLines = 20_000
+
+    /** 通知/铃声/闹钟停止后继续让路多久（毫秒），把一串提示音并成一段，避免反复通断。 */
+    private const val NonMediaHoldMs = 1_200L
+
+    /** 媒体停止后继续保留增强多久（毫秒），避免切歌的间隙里增益反复跳。 */
+    private const val MediaHoldMs = 800L
 
     /** 输出路由快照。 */
     private class RouteInfo(
@@ -109,7 +128,21 @@ object RootDaemon {
         val volumeMonitor = VolumeMonitor()
         var lastVolumeTick = 0L
         var lastAppliedVolume = -1
-        writeStatus(statusFile, chain, null, route, paused)
+
+        // 只有**媒体真的在播**的时候才增强，其余时间链路保持中性。
+        //
+        // 原因：音效挂在全局混音 session 0 上，AudioFlinger 不区分流类型，
+        // 通知音、提示音会和媒体走同一条总线一起被推大。开着「音频触感」的机型上，
+        // 通知音变大就等于震动变强 —— 这就是来消息时震手的来源。
+        // 所以这里改成「没媒体在播 = 不增强」：手机闲着的时候来消息，
+        // 链路本来就没在放大，通知音是原声，震动也就回到原来的强度。
+        val playbackMonitor = PlaybackMonitor()
+        var lastPlayerTick = 0L
+        var bypass = true
+        var nonMediaUntil = 0L
+        var mediaUntil = 0L
+
+        writeStatus(statusFile, chain, null, route, paused, bypass)
 
         while (true) {
             val text = runCatching { cmdFile.readText() }.getOrDefault("")
@@ -118,7 +151,7 @@ object RootDaemon {
                 if (missingSince == 0L) missingSince = System.currentTimeMillis()
                 if (System.currentTimeMillis() - missingSince > 5_000L) {
                     chain.release()
-                    writeStatus(statusFile, chain, "配置已消失", route, paused)
+                    writeStatus(statusFile, chain, "配置已消失", route, paused, bypass)
                     Log.i(TAG, "配置文件已消失，退出")
                     return
                 }
@@ -129,7 +162,7 @@ object RootDaemon {
                     val cfg = DaemonConfig.parse(text)
                     if (!cfg.active) {
                         chain.release()
-                        writeStatus(statusFile, chain, "已关闭", route, paused)
+                        writeStatus(statusFile, chain, "已关闭", route, paused, bypass)
                         Log.i(TAG, "收到关闭指令，退出")
                         return
                     }
@@ -143,9 +176,9 @@ object RootDaemon {
                     }
                     activeConfig = applied
                     if (route.speakerOnly) {
-                        val error = chain.apply(applied)
+                        val error = chain.apply(applied, neutral = bypass)
                         paused = false
-                        writeStatus(statusFile, chain, error, route, paused)
+                        writeStatus(statusFile, chain, error, route, paused, bypass)
                         Log.i(
                             TAG,
                             "应用配置 boost=${applied.boost} bass=${applied.bass} " +
@@ -155,7 +188,7 @@ object RootDaemon {
                     } else {
                         // 非扬声器输出：不建链
                         paused = true
-                        writeStatus(statusFile, chain, null, route, paused)
+                        writeStatus(statusFile, chain, null, route, paused, bypass)
                         Log.i(TAG, "当前输出为 ${route.label}，暂停所有处理")
                     }
                     lastBeat = System.currentTimeMillis()
@@ -172,20 +205,20 @@ object RootDaemon {
                     if (cfg != null && cfg.active) {
                         if (route.speakerOnly) {
                             // 回到外放：重新建链
-                            val error = chain.apply(cfg)
+                            val error = chain.apply(cfg, neutral = bypass)
                             paused = false
-                            writeStatus(statusFile, chain, error, route, paused)
+                            writeStatus(statusFile, chain, error, route, paused, bypass)
                             Log.i(TAG, "输出切回 ${route.label}，恢复处理 mode=${chain.mode} err=$error")
                         } else {
                             // 切到耳机/蓝牙：释放整条链
                             chain.release()
                             paused = true
-                            writeStatus(statusFile, chain, null, route, paused)
+                            writeStatus(statusFile, chain, null, route, paused, bypass)
                             Log.i(TAG, "输出切到 ${route.label}，暂停所有处理")
                         }
                         lastBeat = System.currentTimeMillis()
                     } else {
-                        writeStatus(statusFile, chain, null, route, paused)
+                        writeStatus(statusFile, chain, null, route, paused, bypass)
                     }
                 }
             }
@@ -200,8 +233,8 @@ object RootDaemon {
                     val applied = base.withVolume(volume.first, volume.second)
                     activeConfig = applied
                     if (route.speakerOnly) {
-                        val error = chain.apply(applied)
-                        writeStatus(statusFile, chain, error, route, paused)
+                        val error = chain.apply(applied, neutral = bypass)
+                        writeStatus(statusFile, chain, error, route, paused, bypass)
                         Log.i(
                             TAG,
                             "系统音量 ${volume.first}/${volume.second}，折算 boost=${applied.boost} " +
@@ -211,9 +244,34 @@ object RootDaemon {
                     lastBeat = System.currentTimeMillis()
                 }
             }
+            // 播放内容轮询：决定这条链现在是「增强」还是「中性」。
+            // 通知/铃声/闹钟一响立刻让路；没有媒体在播时保持中性。
+            if (System.currentTimeMillis() - lastPlayerTick > PlayerPollMs) {
+                lastPlayerTick = System.currentTimeMillis()
+                val scan = playbackMonitor.scan()
+                val now = System.currentTimeMillis()
+                if (scan.nonMedia) nonMediaUntil = now + NonMediaHoldMs
+                if (scan.media) mediaUntil = now + MediaHoldMs
+                val shouldBypass = now < nonMediaUntil || now >= mediaUntil
+                if (shouldBypass != bypass) {
+                    bypass = shouldBypass
+                    val cfg = activeConfig
+                    if (route.speakerOnly && cfg != null && cfg.active) {
+                        val error = chain.apply(cfg, neutral = bypass)
+                        writeStatus(statusFile, chain, error, route, paused, bypass)
+                        Log.i(
+                            TAG,
+                            if (bypass) "无媒体播放或提示音在响，音效保持中性" else "媒体开始播放，音效生效",
+                        )
+                        lastBeat = System.currentTimeMillis()
+                    } else {
+                        writeStatus(statusFile, chain, null, route, paused, bypass)
+                    }
+                }
+            }
             if (System.currentTimeMillis() - lastBeat > 2_000L) {
                 // 心跳：App 靠 status 里的 ts 判断守护进程是否还活着（不需要 su）
-                writeStatus(statusFile, chain, null, route, paused)
+                writeStatus(statusFile, chain, null, route, paused, bypass)
                 lastBeat = System.currentTimeMillis()
             }
             Thread.sleep(250)
@@ -226,6 +284,7 @@ object RootDaemon {
         error: String?,
         route: RouteInfo,
         paused: Boolean,
+        bypass: Boolean,
     ) {
         val text = buildString {
             appendLine("pv=$ProtocolVersion")
@@ -237,6 +296,7 @@ object RootDaemon {
             appendLine("mbc=${if (chain.mbcAvailable) 1 else 0}")
             appendLine("route=${route.label}")
             appendLine("paused=${if (paused) 1 else 0}")
+            appendLine("bypass=${if (bypass) 1 else 0}")
             appendLine("error=${error ?: chain.error ?: ""}")
             appendLine("ts=${System.currentTimeMillis()}")
         }
@@ -263,25 +323,39 @@ object RootDaemon {
 
         val ready: Boolean get() = dynamics != null || loudness != null
 
-        fun apply(cfg: DaemonConfig): String? {
+        /**
+         * 把一份配置下发到音效链。
+         *
+         * [neutral] = true 时整条链变成「直通」：增益 0 dB、EQ 全平、低音 0、多段压缩关，
+         * 让这一路声音原样过去。限幅器保持常开 —— 它只在接近满刻度时压峰，
+         * 不放大任何声音，所以不会让通知音变响。
+         * 通知/铃声/闹钟和「当前没有媒体播放」都走这个状态。
+         *
+         * 之所以不直接 release 整条链：反复建链要几百毫秒，提示音早就响完了；
+         * 而且 session 0 上频繁建链释放容易踩到厂商 DSP 的坑。
+         * 走同一条 apply 路径只是改参数，切换只要几毫秒，恢复时也只是一次再下发。
+         */
+        fun apply(cfg: DaemonConfig, neutral: Boolean = false): String? {
             if (!ensure()) return error
 
             dynamics?.let { dp ->
-                val gainDb = (cfg.boost / 100f).coerceIn(MinInputGainDb, MaxInputGainDb)
+                val gainDb = if (neutral) 0f else (cfg.boost / 100f).coerceIn(MinInputGainDb, MaxInputGainDb)
                 runCatching { dp.setInputGainAllChannelsTo(gainDb) }
                 for (i in freqs.indices) {
                     val band = DynamicsProcessing.EqBand(
                         true,
                         freqs[i].toFloat(),
-                        totalGainDb(sampleCurve(cfg.eq, freqs[i]), freqs[i], cfg.bass),
+                        if (neutral) 0f else totalGainDb(sampleCurve(cfg.eq, freqs[i]), freqs[i], cfg.bass),
                     )
                     runCatching { dp.setPreEqBandAllChannelsTo(i, band) }
                 }
-                applyLeveler(dp, cfg.leveler)
+                applyLeveler(dp, if (neutral) 0 else cfg.leveler)
             }
 
             loudness?.let { le ->
-                runCatching { le.setTargetGain(cfg.boost.coerceIn(0, DegradedMaxMillibel)) }
+                runCatching {
+                    le.setTargetGain(if (neutral) 0 else cfg.boost.coerceIn(0, DegradedMaxMillibel))
+                }
             }
 
             return null
@@ -608,5 +682,101 @@ object RootDaemon {
             if (max <= 0) return -1 to 15
             return current.coerceIn(0, max) to max
         }
+    }
+
+    /**
+     * 一次扫描的结果。
+     *
+     * [parsed] 为 false 表示这份 dump 的格式和预期对不上（机型/系统版本差异），
+     * 此时 [media] 会被当作 true —— 宁可继续增强，也不能让功能凭空失灵。
+     */
+    private class PlaybackScan(val media: Boolean, val nonMedia: Boolean, val parsed: Boolean)
+
+    /**
+     * 播放内容探测。
+     *
+     * 音效挂在全局混音 session 0 上，AudioFlinger 不区分流类型：通知、铃声、闹钟
+     * 和媒体走的是同一条总线，所以通知音会被一起推大。开着「音频触感」的机型上，
+     * 通知音变大就等于震动变强 —— 这就是来消息时震手的来源。
+     *
+     * 这里读 `dumpsys audio` 的 players 段，把正在播的流分成两类：
+     * 媒体（媒体/语音助手/游戏/有声书/导航播报）和提示音（通知/铃声/闹钟/系统音效）。
+     * 只有媒体这一类才允许增强，其余一律让路。
+     */
+    private class PlaybackMonitor {
+        /** 播放器记录行里的播放状态，例如 `... state:started attr:AudioAttributes: ...`。 */
+        private val stateRegex = Regex("""state:(\w+)""")
+
+        /** 同一行里的音频用途，例如 `... usage=USAGE_NOTIFICATION content=...`。 */
+        private val usageRegex = Regex("""usage=(USAGE_[A-Z_]+)""")
+
+        /** 这些 usage 算「媒体」，增强只对它们生效。 */
+        private val mediaUsages = setOf(
+            "USAGE_MEDIA",
+            "USAGE_GAME",
+            "USAGE_ASSISTANCE_ACCESSIBILITY",
+            "USAGE_ASSISTANCE_NAVIGATION_GUIDANCE",
+            "USAGE_ASSISTANT",
+            "USAGE_AUDIOBOOK",
+        )
+
+        /** 这些 usage 属于「系统提示音」，一律让路。 */
+        private val nonMediaUsages = setOf(
+            "USAGE_ALARM",
+            "USAGE_NOTIFICATION",
+            "USAGE_NOTIFICATION_RINGTONE",
+            "USAGE_NOTIFICATION_COMMUNICATION_REQUEST",
+            "USAGE_NOTIFICATION_COMMUNICATION_INSTANT",
+            "USAGE_NOTIFICATION_COMMUNICATION_DELAYED",
+            "USAGE_NOTIFICATION_EVENT",
+            "USAGE_ASSISTANCE_SONIFICATION",
+        )
+
+        /**
+         * 扫一遍当前所有播放器。
+         *
+         * 两类都命中就提前收工，不等整个 dump 跑完。
+         * 读不到时返回全 false：链路保持中性，宁可少增强，也不要把通知音推大。
+         */
+        fun scan(): PlaybackScan = runCatching {
+            val process = ProcessBuilder("dumpsys", "audio")
+                .redirectErrorStream(true)
+                .start()
+            var media = false
+            var nonMedia = false
+            // 看到 players: 段头才认为这份 dump 的格式对得上；
+            // 一段播放器都没有（手机彻底空闲）同样是「读懂了」，不能当成解析失败
+            var sawHeader = false
+            var budget = PlayerScanMaxLines
+            try {
+                process.inputStream.bufferedReader().use { reader ->
+                    while (!(media && nonMedia) && budget-- > 0) {
+                        val line = reader.readLine() ?: break
+                        // 跳过 AudioService 的事件日志：那里的 state:started 是历史记录，
+                        // 不代表现在正在播，按它判断会让链路一直卡在让路状态
+                        if (isLogLine(line)) continue
+                        // 播放器段头或任意一条播放器记录，都说明这份 dump 读得懂
+                        if (line.trimStart().startsWith("players:") || line.contains("piid:")) {
+                            sawHeader = true
+                        }
+                        val state = stateRegex.find(line)?.groupValues?.get(1) ?: continue
+                        if (state != "started") continue
+                        val usage = usageRegex.find(line)?.groupValues?.get(1) ?: continue
+                        if (usage in mediaUsages) {
+                            media = true
+                        } else if (usage in nonMediaUsages) {
+                            nonMedia = true
+                        }
+                    }
+                }
+            } finally {
+                runCatching { process.destroy() }
+            }
+            PlaybackScan(media || !sawHeader || budget <= 0, nonMedia, sawHeader)
+        }.getOrDefault(PlaybackScan(media = true, nonMedia = false, parsed = false))
+
+        /** 事件日志的行首形如 `10-29 22:31:07:123`，不是当前播放状态。 */
+        private fun isLogLine(line: String): Boolean =
+            line.length > 6 && line[2] == '-' && line[5] == ' ' && line[0].isDigit() && line[1].isDigit()
     }
 }
