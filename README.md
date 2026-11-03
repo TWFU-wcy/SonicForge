@@ -6,20 +6,15 @@
 
 > **只支持 ROOT。** 普通 App 在 `audioSession = 0` 创建全局音效会被 AudioFlinger 以缺少 `MODIFY_AUDIO_ROUTING` 拒绝，HyperOS 上还有杜比 / 小米音效抢占 session 0 的链路 —— 免 ROOT 的路在真机上根本走不通。所以本应用把整条效果链搬进 **uid 0 的守护进程**，没有普通模式，也没有降级模式。
 
-![主页 浅色](docs/screenshots/home-light.png)
+<p align="center">
+  <img src="docs/screenshots/home-light.png" width="30%" alt="主页：实际补偿 +23% · 等效 +3.0 dB" />
+  <img src="docs/screenshots/equalizer.png" width="30%" alt="调节：增益上限与 10 段均衡器" />
+  <img src="docs/screenshots/settings.png" width="30%" alt="设置：ROOT 状态、单声道、外观" />
+</p>
 
-<details>
-<summary>更多截图：深色主页 / 均衡器 / 设置</summary>
+<p align="center"><sub>真机截图（SonicForge 1.5.1，Android 17 / HyperOS）：主页 · 调节 · 设置</sub></p>
 
-![主页 深色](docs/screenshots/home-dark.png)
-
-![均衡器](docs/screenshots/equalizer.png)
-
-![设置](docs/screenshots/settings.png)
-
-</details>
-
-> 截图来自 Android 16（API 36）模拟器（模拟器无 `su`，所以主页显示「需要 ROOT 才能开启」）。真机注入临时 ROOT 后副标题会变成「ROOT 已授权 · 全局音效可用」，毛玻璃与光斑效果也更明显。
+> 截图取自真机、ROOT 已授权、增强已开启的实时状态：大圆弧是随系统媒体音量折算后的**实际补偿**（+23% ≈ +3.0 dB），下面两行分别是「当前最大补偿」和「实际补偿」。音量推高时这两个数会一起变小，满音量归零。
 
 ## 功能
 
