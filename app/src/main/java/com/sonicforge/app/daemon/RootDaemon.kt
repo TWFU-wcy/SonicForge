@@ -6,6 +6,9 @@ import android.media.audiofx.LoudnessEnhancer
 import android.util.Log
 import com.sonicforge.app.audio.Preset
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.ln
 
 /**
@@ -22,8 +25,6 @@ import kotlin.math.ln
  * 本文件不含任何提权代码，只在系统已经提供 su 时被调用。
  */
 object RootDaemon {
-
-    private const val TAG = "VBRootDaemon"
 
     /** 全局混音输出会话。 */
     private const val GlobalSession = 0
@@ -52,7 +53,7 @@ object RootDaemon {
      *
      * 只要状态文件里新增/改动了字段，这个数字就要 +1。
      */
-    private const val ProtocolVersion = 5
+    private const val ProtocolVersion = 6
 
     /** 三段的分频点（Hz），也是每段的截止频率。 */
     private val MbcCutoffs = floatArrayOf(200f, 2000f, 20000f)
@@ -62,6 +63,18 @@ object RootDaemon {
 
     /** 多久读一次系统媒体音量（毫秒）。音量键按住不放时会连发，1.2 秒够跟手。 */
     private const val VolumePollMs = 1_200L
+
+    /**
+     * 建链失败后多久重试一次（毫秒）。
+     *
+     * 曾经只在配置发生变化时才调 [EffectChain.apply]，于是 audioserver 重启把音效
+     * 冲掉之后，只要用户不拖滑杆就永远不会重试，界面一直停在「建链失败」。
+     * 重试必须放在心跳写入之后，否则排队的重试会把状态文件的心跳卡住。
+     */
+    private const val RetryBaseMs = 5_000L
+
+    /** 重试间隔上限（毫秒）：连续失败时按指数退避，最多等这么久。 */
+    private const val RetryMaxMs = 60_000L
 
     /** 输出路由快照。 */
     private class RouteInfo(
@@ -77,15 +90,20 @@ object RootDaemon {
     fun main(args: Array<String>) {
         val cmdFile = File(args.getOrElse(0) { "/data/local/tmp/sonicforge.cmd" })
         val statusFile = File(args.getOrElse(1) { "/data/local/tmp/sonicforge.status" })
+        // 事件日志与状态文件同目录：文件属主是 root，但权限放开到 0666，
+        // 普通 App 进程才能直接读出来打包导出，不必再走 logcat。
+        val logFile = File(statusFile.parentFile ?: File("/data/local/tmp"), "sf_daemon.log")
 
-        Log.i(TAG, "守护进程启动 uid=${android.os.Process.myUid()} pid=${android.os.Process.myPid()}")
+        DaemonLog.attach(logFile)
+        DaemonLog.i("守护进程启动 uid=${android.os.Process.myUid()} pid=${android.os.Process.myPid()}")
 
         // 降低被 LMK 回收的概率。
         // 本进程是从 App 的 su 会话里派生的，会继承较高的 oom 权重；
         // 有 root 就能把自己调成"几乎不会被杀"的级别，App 退出后也能继续工作。
         runCatching { File("/proc/self/oom_score_adj").writeText("-900") }
-            .onSuccess { Log.i(TAG, "oom_score_adj 已设为 -900") }
-            .onFailure { Log.w(TAG, "oom_score_adj 设置失败: ${it.message}") }
+            .onSuccess { DaemonLog.i("oom_score_adj 已设为 -900") }
+            .onFailure { DaemonLog.w("oom_score_adj 设置失败: ${it.message}") }
+
 
         val chain = EffectChain()
         var lastConfig = ""
@@ -95,6 +113,10 @@ object RootDaemon {
         var activeConfig: DaemonConfig? = null
         // App 下发的原始配置（含增益上限），系统音量变化时用它折算
         var baseConfig: DaemonConfig? = null
+
+        // 建链失败后的重试状态：连续失败按指数退避，成功一次就清零。
+        var retryAt = 0L
+        var retryFailures = 0
 
         // 输出路由：只处理内置扬声器。插耳机/连蓝牙/接 USB 时整条链要停下来，
         // 让这些设备按原本的样子出声 —— 它们的耳机口和 DAC 本来就不需要补音量，
@@ -109,7 +131,29 @@ object RootDaemon {
         val volumeMonitor = VolumeMonitor()
         var lastVolumeTick = 0L
         var lastAppliedVolume = -1
+        // 音效存活校验的节流时间戳
+        var lastHealthTick = 0L
         writeStatus(statusFile, chain, null, route, paused)
+
+        /**
+         * 应用一份配置，并维护重试状态。
+         *
+         * 失败时记下下次重试时刻，由主循环在心跳之后补一次重试——不再依赖
+         * 「配置文本发生变化」这个前提，否则 audioserver 重启把音效冲掉之后，
+         * 只要用户不拖滑杆就永远不会重建。
+         */
+        fun applyWithRetry(cfg: DaemonConfig) {
+            val error = chain.apply(cfg)
+            if (error == null) {
+                retryFailures = 0
+                retryAt = 0L
+            } else {
+                retryFailures++
+                val delayMs = minOf(RetryMaxMs, RetryBaseMs shl (retryFailures - 1).coerceAtMost(4))
+                retryAt = System.currentTimeMillis() + delayMs
+                DaemonLog.w("建链失败（第 ${retryFailures} 次），${delayMs / 1000} 秒后重试：$error")
+            }
+        }
 
         while (true) {
             val text = runCatching { cmdFile.readText() }.getOrDefault("")
@@ -119,7 +163,7 @@ object RootDaemon {
                 if (System.currentTimeMillis() - missingSince > 5_000L) {
                     chain.release()
                     writeStatus(statusFile, chain, "配置已消失", route, paused)
-                    Log.i(TAG, "配置文件已消失，退出")
+                    DaemonLog.i("配置文件已消失，退出")
                     return
                 }
             } else {
@@ -130,7 +174,7 @@ object RootDaemon {
                     if (!cfg.active) {
                         chain.release()
                         writeStatus(statusFile, chain, "已关闭", route, paused)
-                        Log.i(TAG, "收到关闭指令，退出")
+                        DaemonLog.i("收到关闭指令，退出")
                         return
                     }
                     baseConfig = cfg
@@ -143,20 +187,19 @@ object RootDaemon {
                     }
                     activeConfig = applied
                     if (route.speakerOnly) {
-                        val error = chain.apply(applied)
+                        applyWithRetry(applied)
                         paused = false
-                        writeStatus(statusFile, chain, error, route, paused)
-                        Log.i(
-                            TAG,
+                        writeStatus(statusFile, chain, null, route, paused)
+                        DaemonLog.i(
                             "应用配置 boost=${applied.boost} bass=${applied.bass} " +
                                 "leveler=${applied.leveler} mode=${chain.mode} " +
-                                "mbc=${chain.mbcAvailable} err=$error",
+                                "mbc=${chain.mbcAvailable} err=${chain.error}",
                         )
                     } else {
                         // 非扬声器输出：不建链
                         paused = true
                         writeStatus(statusFile, chain, null, route, paused)
-                        Log.i(TAG, "当前输出为 ${route.label}，暂停所有处理")
+                        DaemonLog.i("当前输出为 ${route.label}，暂停所有处理")
                     }
                     lastBeat = System.currentTimeMillis()
                 }
@@ -172,16 +215,16 @@ object RootDaemon {
                     if (cfg != null && cfg.active) {
                         if (route.speakerOnly) {
                             // 回到外放：重新建链
-                            val error = chain.apply(cfg)
+                            applyWithRetry(cfg)
                             paused = false
-                            writeStatus(statusFile, chain, error, route, paused)
-                            Log.i(TAG, "输出切回 ${route.label}，恢复处理 mode=${chain.mode} err=$error")
+                            writeStatus(statusFile, chain, null, route, paused)
+                            DaemonLog.i("输出切回 ${route.label}，恢复处理 mode=${chain.mode} err=${chain.error}")
                         } else {
                             // 切到耳机/蓝牙：释放整条链
                             chain.release()
                             paused = true
                             writeStatus(statusFile, chain, null, route, paused)
-                            Log.i(TAG, "输出切到 ${route.label}，暂停所有处理")
+                            DaemonLog.i("输出切到 ${route.label}，暂停所有处理")
                         }
                         lastBeat = System.currentTimeMillis()
                     } else {
@@ -200,21 +243,46 @@ object RootDaemon {
                     val applied = base.withVolume(volume.first, volume.second)
                     activeConfig = applied
                     if (route.speakerOnly) {
-                        val error = chain.apply(applied)
-                        writeStatus(statusFile, chain, error, route, paused)
-                        Log.i(
-                            TAG,
+                        applyWithRetry(applied)
+                        writeStatus(statusFile, chain, null, route, paused)
+                        DaemonLog.i(
                             "系统音量 ${volume.first}/${volume.second}，折算 boost=${applied.boost} " +
-                                "bass=${applied.bass} err=$error",
+                                "bass=${applied.bass} err=${chain.error}",
                         )
                     }
                     lastBeat = System.currentTimeMillis()
                 }
             }
+            // 心跳：App 靠 status 里的 ts 判断守护进程是否还活着（不需要 su）。
+            // 必须写在重试之前——重试里的 binder 调用可能阻塞几十秒，
+            // 放在心跳后面才不会把状态文件冻住、让界面误报「未运行」。
             if (System.currentTimeMillis() - lastBeat > 2_000L) {
-                // 心跳：App 靠 status 里的 ts 判断守护进程是否还活着（不需要 su）
                 writeStatus(statusFile, chain, null, route, paused)
                 lastBeat = System.currentTimeMillis()
+            }
+            // 建链重试：独立于配置变化，失败后按退避节奏自己爬起来。
+            val cfgForRetry = activeConfig
+            if (retryAt > 0L && System.currentTimeMillis() >= retryAt &&
+                cfgForRetry != null && cfgForRetry.active && route.speakerOnly
+            ) {
+                retryAt = 0L
+                applyWithRetry(cfgForRetry)
+                writeStatus(statusFile, chain, null, route, paused)
+            }
+            // 音效存活校验：audioserver 重启后 Java 里的句柄还在，但底层 effect
+            // 已经没了。只看「对象非空」会让守护进程一直报 FULL 其实早没生效。
+            // 每 250 ms 一查会白白压一条 binder，这里跟路由轮询一样按 1.2 秒节流。
+            if (route.speakerOnly &&
+                System.currentTimeMillis() - lastHealthTick > RoutePollMs
+            ) {
+                lastHealthTick = System.currentTimeMillis()
+                if (chain.needsRebuild()) {
+                    DaemonLog.w("音效已失效（底层 effect 已随 audioserver 消失），释放后准备重建")
+                    chain.release()
+                    writeStatus(statusFile, chain, null, route, paused)
+                    retryFailures = 0
+                    retryAt = System.currentTimeMillis() + RetryBaseMs
+                }
             }
             Thread.sleep(250)
         }
@@ -261,7 +329,33 @@ object RootDaemon {
         var mbcAvailable: Boolean = false
             private set
 
+        /** 是否建链成功过；[release] 会清掉，用来区分「从没建起来」和「曾经好过又掉了」。 */
+        private var everReady = false
+
         val ready: Boolean get() = dynamics != null || loudness != null
+
+        /**
+         * 音效是否已经失效，需要释放后重建。
+         *
+         * audioserver 重启会把底层 effect 端掉，但 Java 里的句柄仍然非空，
+         * [ready] 依然为 true——于是守护进程一直报 FULL，实际早就没处理了。
+         *
+         * 不能查 `enabled`：它读的是 AudioEffect 里缓存的 mEnabled 字段，
+         * audioserver 死掉后那个缓存不会更新，照样返回 true（实测确认过）。
+         * 必须发一次真正的 binder 调用——读一个参数，底层没了就会抛
+         * DEAD_OBJECT，这才是可靠的判据。
+         */
+        fun needsRebuild(): Boolean {
+            if (!ready) return false
+            val fx: AudioEffect = dynamics ?: loudness ?: return false
+            // 必须发一次真正的 binder 调用：`enabled` 读的是 AudioEffect 里缓存的
+            // mEnabled 字段，audioserver 死后不会更新，照样返回 true（实测确认）。
+            // setEnabled 每次都会走 setParameter；底层 effect 已不存在时返回
+            // ERROR_DEAD_OBJECT 或抛 IllegalStateException，两种都算失效。
+            val status = runCatching { fx.setEnabled(true) }
+                .getOrElse { return true }
+            return status == AudioEffect.ERROR_DEAD_OBJECT
+        }
 
         fun apply(cfg: DaemonConfig): String? {
             if (!ensure()) return error
@@ -333,11 +427,16 @@ object RootDaemon {
                 )
             }
             runCatching { dp.setMbcAllChannelsTo(mbc) }
-                .onFailure { Log.w(TAG, "响度均衡下发失败: ${it.message}") }
+                .onFailure { DaemonLog.w("响度均衡下发失败: ${it.message}") }
         }
 
         private fun ensure(): Boolean {
             if (ready) return true
+
+            // 记下每个候选的真实异常：只有知道是 DEAD_OBJECT 还是 BAD_VALUE，
+            // 才能判断是「audioserver 正在重启」还是「本机 DSP 不支持这个配置」。
+            var lastError: String? = null
+            var attempts = 0
 
             // 首选：DynamicsProcessing（增益 → 均衡 → 多段压缩 → 限幅 一条链，顺序确定）
             // 先按「带 MBC（响度均衡）」建链，失败再退回不带 MBC 的同一条链：
@@ -345,6 +444,8 @@ object RootDaemon {
             for (withMbc in booleanArrayOf(true, false)) {
                 for (candidate in BandCountCandidates) {
                     val candidateFreqs = pickFrequencies(candidate)
+                    attempts++
+                    var failure: String? = null
                     val built = runCatching {
                         val builder = DynamicsProcessing.Config.Builder(
                             DynamicsProcessing.VARIANT_FAVOR_FREQUENCY_RESOLUTION,
@@ -376,39 +477,73 @@ object RootDaemon {
                             DynamicsProcessing.Limiter(true, true, 0, 0.001f, 0.080f, 20f, LimiterThresholdDb, 0f)
                         )
                         val fx = DynamicsProcessing(GlobalSession, EffectPriority, builder.build())
-                        if (fx.setEnabled(true) == AudioEffect.SUCCESS && fx.enabled) {
+                        val enableStatus = fx.setEnabled(true)
+                        if (enableStatus == AudioEffect.SUCCESS && fx.enabled) {
                             fx
                         } else {
                             runCatching { fx.release() }
+                            failure = describe("启用返回 $enableStatus（bands=$candidate mbc=$withMbc）")
                             null
                         }
-                    }.getOrNull()
+                    }.getOrElse { e ->
+                        failure = describe("bands=$candidate mbc=$withMbc", e)
+                        null
+                    }
 
                     if (built != null) {
                         dynamics = built
                         freqs = candidateFreqs
                         mbcAvailable = withMbc
                         mode = "FULL"
-                        Log.i(TAG, "FULL 链路已建立 bands=$candidate mbc=$withMbc")
+                        everReady = true
+                        DaemonLog.i("FULL 链路已建立 bands=$candidate mbc=$withMbc")
                         return true
                     }
+                    if (failure != null) lastError = failure
                 }
             }
 
             // 退化：只有 LoudnessEnhancer
+            var leFailure: String? = null
             val le = runCatching {
-                LoudnessEnhancer(GlobalSession).apply { setEnabled(true) }
-            }.onFailure { Log.w(TAG, "LoudnessEnhancer 创建失败: ${it.message}") }.getOrNull()
+                LoudnessEnhancer(GlobalSession).apply {
+                    val enableStatus = setEnabled(true)
+                    if (enableStatus != AudioEffect.SUCCESS) {
+                        leFailure = describe("LoudnessEnhancer 启用返回 $enableStatus")
+                    }
+                }
+            }.onFailure { e ->
+                leFailure = describe("LoudnessEnhancer 创建失败", e)
+            }.getOrNull()
 
             if (le != null && runCatching { le.enabled }.getOrDefault(false)) {
                 loudness = le
                 mode = "DEGRADED"
-                Log.w(TAG, "降级为 LoudnessEnhancer 单效果")
+                everReady = true
+                DaemonLog.w("降级为 LoudnessEnhancer 单效果")
                 return true
             }
 
-            error = "系统拒绝在 session 0 创建音效"
+            // 把失败原因说清楚：以前这里写死「系统拒绝在 session 0 创建音效」，
+            // 但真正的原因常常是 audioserver 正在重启（DEAD_OBJECT），
+            // 一句假话会把排查方向带偏好几个小时。
+            val detail = leFailure ?: lastError
+            error = buildString {
+                append("无法在全局混音会话创建音效（尝试 $attempts 种配置）")
+                if (detail != null) append("：").append(detail)
+                if (everReady) append("；此前曾建链成功，可能是 audioserver 重启导致失效")
+            }
+            DaemonLog.e(error!!)
             return false
+        }
+
+        /** 把异常翻译成一句能直接看懂的话，带上错误码。 */
+        private fun describe(prefix: String, e: Throwable? = null): String {
+            if (e == null) return prefix
+            val msg = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+            // android.media.audiofx 的异常里通常带着 status_t 数字，
+            // -3 = DEAD_OBJECT（audioserver 刚重启）、-22 = BAD_VALUE（参数不被接受）
+            return "$prefix：${e.javaClass.simpleName}: $msg"
         }
 
         fun release() {
@@ -422,6 +557,8 @@ object RootDaemon {
             loudness = null
             freqs = IntArray(0)
             mode = "NONE"
+            // mbcAvailable 保留：它描述的是「本机 DSP 能力」，不是当前链的状态。
+            // 但 ready 变 false 后 ok=0，界面不会再误报成在跑。
         }
     }
 
@@ -607,6 +744,77 @@ object RootDaemon {
             val max = match.groupValues[3].toIntOrNull() ?: return -1 to 15
             if (max <= 0) return -1 to 15
             return current.coerceIn(0, max) to max
+        }
+    }
+}
+
+/**
+ * 守护进程的事件日志。
+ *
+ * 以前所有诊断都走 [android.util.Log]，只进系统 logcat——而普通 App 进程读不到
+ * uid 0 的 logcat 行，用户又不可能为了报个 bug 去连 adb。结果就是设置页的
+ * 「日志尾部」永远是空的，最关键的失败现场反而拿不到。
+ *
+ * 所以这里额外写一份到 `files/sf_daemon.log`：文件权限放到 0666，
+ * App 直接 readText 就能打包导出；同时仍然打印到 logcat，方便 adb 排查。
+ *
+ * 只记事件（启动、建链、失败原因、路由切换、音量折算），不记每次心跳，
+ * 否则 250 ms 一轮的轮询会瞬间把日志刷满。
+ */
+private object DaemonLog {
+
+    private const val TAG = "VBRootDaemon"
+
+    private const val MaxBytes = 128 * 1024L
+
+    private val timeFormat = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
+
+    @Volatile
+    private var file: File? = null
+
+    /** 绑定日志文件；父目录必须已存在（由 App 的 filesDir 提供）。 */
+    fun attach(target: File) {
+        file = target
+        runCatching {
+            if (!target.exists()) target.createNewFile()
+            // 守护进程是 root，写出的文件默认 0600；App 要能读就必须放开
+            target.setReadable(true, false)
+            target.setWritable(true, false)
+        }
+    }
+
+    fun i(message: String) = write("I", message)
+
+    fun w(message: String) = write("W", message)
+
+    fun e(message: String) = write("E", message)
+
+    private fun write(level: String, message: String) {
+        // 先打 logcat：即使写文件失败（权限、磁盘满），adb 那边仍然有记录
+        when (level) {
+            "E" -> Log.e(TAG, message)
+            "W" -> Log.w(TAG, message)
+            else -> Log.i(TAG, message)
+        }
+
+        val target = file ?: return
+        runCatching {
+            rotateIfNeeded(target)
+            val line = "${timeFormat.format(Date())} $level $message\n"
+            target.appendText(line)
+            // root 每次重建文件后权限可能被重置，这里补一次放开读
+            target.setReadable(true, false)
+        }
+    }
+
+    /** 超过上限就把当前文件挪成 .1（只留一份备份），避免无限增长。 */
+    private fun rotateIfNeeded(target: File) {
+        if (!target.exists() || target.length() < MaxBytes) return
+        val backup = File(target.parentFile, target.name + ".1")
+        runCatching {
+            if (backup.exists()) backup.delete()
+            target.renameTo(backup)
+            backup.setReadable(true, false)
         }
     }
 }

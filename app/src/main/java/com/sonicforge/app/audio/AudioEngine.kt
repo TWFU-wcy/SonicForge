@@ -7,6 +7,7 @@ import android.media.audiofx.AudioEffect
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
+import com.sonicforge.app.BuildConfig
 import com.sonicforge.app.root.RootDaemonClient
 import com.sonicforge.app.root.RootShell
 import kotlinx.coroutines.CoroutineScope
@@ -16,6 +17,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.ln
 
 /**
@@ -158,7 +162,24 @@ class AudioEngine(context: Context) {
         if (_state.value.active) return
         // 直接读状态文件里的心跳时间戳，不需要 su 也能判断守护进程是否还活着
         val status = runCatching { client.readStatus() }.getOrNull() ?: return
-        if (!status.isAlive()) return
+        if (!status.isAlive()) {
+            // 进程活着但链路没建起来（ok=0、paused=0，心跳新鲜）：
+            // 以前这里直接 return，界面就停在「已关闭」，用户根本不知道有个坏进程在跑。
+            // 现在把原因显示出来，用户点一下开关就会走 start() 的清理重拉路径。
+            if (status.isRunningButBroken()) {
+                _state.value = _state.value.copy(
+                    active = false,
+                    mode = EngineMode.UNSUPPORTED,
+                    limiterActive = false,
+                    error = buildString {
+                        append("守护进程在运行但音效链没建起来")
+                        status.error?.takeIf { it.isNotBlank() }?.let { append("：").append(it) }
+                        append("。点一下增强开关会重建。")
+                    },
+                )
+            }
+            return
+        }
         val cfg = runCatching { client.readConfig() }.getOrNull()
         val volume = readSystemVolume()
         // 配置文件里的 boost 是「小音量时的补偿上限」，不是当前实际值；
@@ -445,6 +466,10 @@ class AudioEngine(context: Context) {
 
     /** 生成一份可复制的运行状态诊断，用来确认 ROOT 链路到底卡在哪。 */
     fun diagnose(): String = buildString {
+        appendLine("SonicForge 诊断报告")
+        appendLine("生成时间：${diagDateFormat.format(Date())}")
+        appendLine("版本：${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+        appendLine()
         appendLine("机型：${Build.MANUFACTURER} ${Build.MODEL}")
         appendLine("系统：Android ${Build.VERSION.RELEASE}（API ${Build.VERSION.SDK_INT}）")
         appendLine("输出路由：${routeLabel()}")
@@ -453,6 +478,7 @@ class AudioEngine(context: Context) {
         appendLine("系统音量：${_state.value.systemVolume}/${_state.value.maxSystemVolume}")
         appendLine("均衡 ${_state.value.eqBandCount} 段 / 限幅 ${_state.value.limiterActive}")
         appendLine("响度均衡：${_state.value.levelerStrength} / 1000（本机支持：${_state.value.levelerAvailable}）")
+        _state.value.error?.takeIf { it.isNotBlank() }?.let { appendLine("界面报错：$it") }
         appendLine()
         appendLine("【ROOT】")
         appendLine(if (RootShell.cachedSu != null) "su：已授权（${RootShell.cachedSu}）" else "su：未授权")
@@ -460,12 +486,30 @@ class AudioEngine(context: Context) {
         if (client != null) {
             // 用状态文件的心跳判断存活：diagnose() 是同步方法，不能直接调 suspend 的 isRunning()
             val status = client.readStatusSync()
-            appendLine("守护进程运行中：${status?.isAlive() == true}")
+            // 存活与「链路是否建立」必须分开报：
+            // 建链失败的进程仍然在跑、仍然在写心跳，以前一律显示「未运行」，把人往错的方向带。
+            appendLine("守护进程存活：${status?.isAlive() == true}")
+            appendLine("音效链生效：${status?.ok == true}")
             appendLine("守护进程模式：${status?.mode ?: "NONE"}")
             appendLine("守护进程输出路由：${status?.route ?: "（未知）"}（耳机暂停：${status?.paused == true}）")
             appendLine("多段压缩（MBC）：${if (status?.mbcAvailable == true) "可用" else "不可用"}")
-            appendLine("日志尾部：")
-            appendLine(client.logTail(15).ifBlank { "（空）" })
+            appendLine("协议版本：${status?.protocolVersion ?: 0}（当前 App 期望 ${RootDaemonClient.DAEMON_PROTOCOL_VERSION}）")
+            appendLine("失败原因：${status?.error?.takeIf { it.isNotBlank() } ?: "（无）"}")
+            appendLine()
+            appendLine("【状态文件原文】${client.statusFilePath}")
+            appendLine(client.readStatusText().ifBlank { "（空）" })
+            appendLine()
+            appendLine("【下发配置原文】${client.cmdFilePath}")
+            appendLine(client.readCmdText().ifBlank { "（空）" })
+            appendLine()
+            appendLine("【守护进程日志尾部】")
+            appendLine(client.logTail(120).ifBlank { "（空）" })
+            val shellTail = client.shellLogTail(60)
+            if (shellTail.isNotBlank()) {
+                appendLine()
+                appendLine("【原生输出 / 崩溃栈】")
+                appendLine(shellTail)
+            }
         } else {
             appendLine("守护进程客户端：未初始化")
         }
@@ -647,6 +691,9 @@ class AudioEngine(context: Context) {
 
     private companion object {
         const val TAG = "AudioEngine"
+
+        /** 诊断报告的生成时间。 */
+        val diagDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.US)
 
         /** 预设曲线的标准频点（Hz），守护进程也按这套频点建链。 */
         val CanonicalEqFreqs = intArrayOf(31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000)

@@ -240,9 +240,9 @@ fun SonicForgeApp(
     themeMode: String,
     onThemeModeChange: (String) -> Unit,
     onDiagnose: () -> String,
+    onExportLog: () -> Unit,
     root: RootState = RootState(checking = false),
     onRootRefresh: () -> Unit = {},
-    onRootVendorChange: (Boolean) -> Unit = {},
 ) {
     var tab by remember { mutableStateOf(Tab.HOME) }
     var preset by remember {
@@ -309,9 +309,9 @@ fun SonicForgeApp(
                                 themeMode = themeMode,
                                 onThemeModeChange = onThemeModeChange,
                                 onDiagnose = onDiagnose,
+                                onExportLog = onExportLog,
                                 root = root,
                                 onRootRefresh = onRootRefresh,
-                                onRootVendorChange = onRootVendorChange,
                             )
                         }
                     }
@@ -1149,9 +1149,9 @@ private fun SettingsPage(
     themeMode: String,
     onThemeModeChange: (String) -> Unit,
     onDiagnose: () -> String,
+    onExportLog: () -> Unit,
     root: RootState = RootState(checking = false),
     onRootRefresh: () -> Unit = {},
-    onRootVendorChange: (Boolean) -> Unit = {},
 ) {
     var diagnoseText by remember { mutableStateOf<String?>(null) }
     Column(
@@ -1167,7 +1167,6 @@ private fun SettingsPage(
         RootSection(
             root = root,
             onRefresh = onRootRefresh,
-            onVendorChange = onRootVendorChange,
         )
 
         Spacer(Modifier.height(12.dp))
@@ -1247,7 +1246,7 @@ private fun SettingsPage(
                         fontWeight = FontWeight.Medium,
                     )
                     Text(
-                        text = "机型、ROOT 状态、守护进程日志与系统音效列表",
+                        text = "机型、ROOT 状态、守护进程日志与系统音效列表，可导出为文件",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1288,6 +1287,10 @@ private fun SettingsPage(
             onDismissRequest = { diagnoseText = null },
             confirmButton = {
                 TextButton(onClick = { diagnoseText = null }) { Text("关闭") }
+            },
+            dismissButton = {
+                // 导出到系统「下载」目录：不申请任何权限，也不需要连 adb
+                TextButton(onClick = onExportLog) { Text("导出日志") }
             },
             title = { Text("音效诊断") },
             text = {
@@ -1358,7 +1361,6 @@ private fun InfoRow(label: String, value: String) {
 private fun RootSection(
     root: RootState,
     onRefresh: () -> Unit,
-    onVendorChange: (Boolean) -> Unit,
 ) {
     PaddedGlassCard(
         modifier = Modifier.fillMaxWidth(),
@@ -1413,35 +1415,10 @@ private fun RootSection(
             TextButton(onClick = onRefresh) { Text("重新检测") }
         } else {
             Text(
-                text = "音量增强全部由守护进程在系统混音链上完成，不需要改动音频芯片。",
+                text = "音量增强全部由守护进程在系统混音链上完成，不需要改动音频芯片，也不需要禁用任何系统音效服务。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-
-            if (root.vendorPackages.isNotEmpty()) {
-                Spacer(Modifier.height(6.dp))
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            text = "释放全局音效通道",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium,
-                        )
-                        Text(
-                            text = "禁用杜比 / 小米音效服务，避免它们和本应用抢占全局音效槽位（实验性，可恢复）",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(
-                        checked = root.vendorBlocked,
-                        onCheckedChange = onVendorChange,
-                    )
-                }
-            }
         }
     }
 }
@@ -1579,6 +1556,7 @@ private fun PreviewHomeDark() {
             themeMode = "system",
             onThemeModeChange = {},
             onDiagnose = { "" },
+            onExportLog = {},
         )
     }
 }
@@ -1605,6 +1583,7 @@ private fun PreviewHomeLight() {
             themeMode = "light",
             onThemeModeChange = {},
             onDiagnose = { "" },
+            onExportLog = {},
         )
     }
 }
@@ -1644,6 +1623,7 @@ private fun PreviewSettingsDark() {
                 themeMode = "dark",
                 onThemeModeChange = {},
                 onDiagnose = { "" },
+                onExportLog = {},
             )
         }
     }

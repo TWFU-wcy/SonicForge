@@ -33,6 +33,16 @@ data class DaemonStatus(
      */
     fun isAlive(now: Long = System.currentTimeMillis()): Boolean =
         (ok || paused) && now - ts in 0..8_000L
+
+    /**
+     * 进程活着、心跳新鲜，但音效链没建起来。
+     *
+     * 这种情况既不算「运行正常」（ok=0），也不算「已停止」（心跳还在），
+     * 以前被 [isAlive] 一并判成 false，界面上就显示成「守护进程未运行」——
+     * 可实际上有个 uid 0 进程在后台空转，点开关还会被它占着不重建。
+     */
+    fun isRunningButBroken(now: Long = System.currentTimeMillis()): Boolean =
+        !ok && !paused && now - ts in 0..8_000L
 }
 
 /** 守护进程当前生效的配置（从 cmd 文件读回）。 */
@@ -57,7 +67,10 @@ class RootDaemonClient(private val context: Context) {
 
     private val cmdFile = File(context.filesDir, "sf_daemon.cmd")
     private val statusFile = File(context.filesDir, "sf_daemon.status")
+    /** 守护进程自己写的事件日志（可读，用于导出）。 */
     private val logFile = File(context.filesDir, "sf_daemon.log")
+    /** app_process 的 stdout/stderr：JVM 崩溃栈落在这里。 */
+    private val shellLogFile = File(context.filesDir, "sf_daemon.shell.log")
 
     /**
      * 写音效配置。文件很小，直接同步写即可。
@@ -86,20 +99,40 @@ class RootDaemonClient(private val context: Context) {
         }
     }
 
+    /**
+     * 判断这份状态是不是「进程活着但链路没建起来」。
+     *
+     * 建链失败的守护进程会一直在跑、也一直在写心跳，但 `ok=0`、`paused=0`。
+     * 这种情况下 [start] 必须杀掉重拉，否则永远卡在同一个坏进程里——
+     * 这正是用户点「增强开关」看起来毫无反应、只能连 adb 手动杀进程的原因。
+     */
+    private fun DaemonStatus.isBroken(now: Long = System.currentTimeMillis()): Boolean =
+        isRunningButBroken(now)
+
     /** 拉起守护进程；已在运行则直接返回 true。 */
     suspend fun start(): Boolean = withContext(Dispatchers.IO) {
+        val current = if (isRunning()) readStatus() else null
+        // 版本对得上、并且链路是好的：直接接管。
+        // 版本对不上说明跑着的是旧 APK 拉起的进程；链路坏了说明它已经废了。
+        // 两种情况都要先杀掉，否则新代码 / 新链路永远不会生效。
+        if (current != null && current.protocolVersion >= DAEMON_PROTOCOL_VERSION &&
+            !current.isBroken()
+        ) {
+            return@withContext true
+        }
         if (isRunning()) {
-            // 版本对得上就直接接管；对不上说明跑着的是装新 APK 之前拉起的旧进程，
-            // 先杀掉再重新拉，否则新代码永远不会生效。
-            val status = readStatus()
-            if (status != null && status.protocolVersion >= DAEMON_PROTOCOL_VERSION) {
-                return@withContext true
-            }
+            Log.i(
+                TAG,
+                "清理残留守护进程：pv=${current?.protocolVersion} ok=${current?.ok} " +
+                    "paused=${current?.paused} err=${current?.error}",
+            )
             killStale()
         }
+
         // 清掉上一次的状态，避免把旧结果当成本次启动成功
         runCatching { statusFile.delete() }
         // 日志文件先建好并放开读权限：守护进程以 root 运行，App 需要能读回日志
+        // （守护进程自己也会 chmod，这里先建好省得它因属主 root 而无法创建）
         runCatching {
             if (!logFile.exists()) logFile.createNewFile()
             logFile.setReadable(true, false)
@@ -108,9 +141,11 @@ class RootDaemonClient(private val context: Context) {
 
         val apk = context.packageCodePath
         // nohup + setsid：su 会话结束后进程要活下来，否则一关屏守护进程就被带走
+        // app_process 的 stdout/stderr 单独留一份 shell.log：守护进程自己写的是
+        // sf_daemon.log（Log.i 走文件），这里收的是 JVM 崩溃栈之类的原生输出。
         val command = "CLASSPATH=$apk nohup setsid app_process /system/bin $DAEMON_CLASS " +
             "${cmdFile.absolutePath} ${statusFile.absolutePath} " +
-            ">> ${logFile.absolutePath} 2>&1 < /dev/null &"
+            ">> ${shellLogFile.absolutePath} 2>&1 < /dev/null &"
         RootShell.exec(command, 15_000L)
 
         repeat(40) {
@@ -249,10 +284,21 @@ class RootDaemonClient(private val context: Context) {
         DaemonConfigSnapshot(active, boost, eq, bass, boostMin, leveler)
     }.getOrNull()
 
-    /** 读取守护进程日志尾部，用于诊断。 */
-    fun logTail(lines: Int = 15): String = runCatching {
+    /** 读取守护进程事件日志尾部，用于诊断与导出。 */
+    fun logTail(lines: Int = 40): String = runCatching {
         logFile.readLines().takeLast(lines).joinToString("\n")
     }.getOrDefault("")
+
+    /** 守护进程原生输出（JVM 崩溃栈）尾部；正常运行时为空。 */
+    fun shellLogTail(lines: Int = 30): String = runCatching {
+        shellLogFile.readLines().takeLast(lines).joinToString("\n")
+    }.getOrDefault("")
+
+    /** 供导出使用的原始文件引用。 */
+    val statusFilePath: String get() = statusFile.absolutePath
+    val cmdFilePath: String get() = cmdFile.absolutePath
+    fun readStatusText(): String = runCatching { statusFile.readText() }.getOrDefault("")
+    fun readCmdText(): String = runCatching { cmdFile.readText() }.getOrDefault("")
 
     companion object {
         private const val TAG = "RootDaemonClient"
@@ -264,8 +310,10 @@ class RootDaemonClient(private val context: Context) {
          *
          * 守护进程状态文件里新增字段时，两个数字一起 +1，
          * 这样老进程会被自动杀掉重拉，不会再出现「新 APK 跑旧代码」。
+         *
+         * 6：守护进程改为自己写事件日志（sf_daemon.log），加固建链重试与音效存活校验。
          */
-        const val DAEMON_PROTOCOL_VERSION = 5
+        const val DAEMON_PROTOCOL_VERSION = 6
 
         /**
          * 用于 pgrep/pkill 的模式。

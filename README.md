@@ -9,10 +9,10 @@
 <p align="center">
   <img src="docs/screenshots/home-light.png" width="30%" alt="主页：实际补偿 +23% · 等效 +3.0 dB" />
   <img src="docs/screenshots/equalizer.png" width="30%" alt="调节：增益上限与 10 段均衡器" />
-  <img src="docs/screenshots/settings.png" width="30%" alt="设置：ROOT 状态、单声道、外观" />
+  <img src="docs/screenshots/settings.png" width="30%" alt="设置：ROOT 状态、单声道、外观、音效诊断" />
 </p>
 
-<p align="center"><sub>真机截图（SonicForge 1.5.1，Android 17 / HyperOS）：主页 · 调节 · 设置</sub></p>
+<p align="center"><sub>真机截图（SonicForge 1.6.0，Android 17 / HyperOS）：主页 · 调节 · 设置</sub></p>
 
 > 截图取自真机、ROOT 已授权、增强已开启的实时状态：大圆弧是随系统媒体音量折算后的**实际补偿**（+23% ≈ +3.0 dB），下面两行分别是「当前最大补偿」和「实际补偿」。音量推高时这两个数会一起变小，满音量归零。
 
@@ -27,7 +27,8 @@
 - 🎙️ **单声道**：直接写系统 `master_mono`（等同于「无障碍 → 单声道音频」），ROOT 下无需任何授权
 - 🎼 **4 个预设**（小音量时的补偿上限）：标准增强 +3.3 dB / 人声增强 +2.7 dB / 外放最大 +4.0 dB / 夜间清晰 +2.0 dB，各自配一条按频段调过的均衡曲线——人声预设抬 250Hz~4kHz 的清晰度，外放预设抬 1kHz~8kHz 的穿透力，夜间预设压中低频、抬高频细节。**四个预设默认都开着响度均衡**（强度 40%~70%，夜间最高），切过去就直接生效，不用再手动拖
 - 🧬 **协议版本自检**：状态文件带 `pv=` 版本号，App 启动时比对，发现跑的是装新 APK 之前拉起的旧守护进程就自动杀掉重拉——不会再出现「界面说响度均衡不可用，其实只是旧进程没这个字段」
-- 🔓 **释放全局音效通道**：临时禁用杜比 / 小米音效包并重启 audioserver，避免它们和本应用抢 session 0 的音效槽位
+- ♻️ **建链自愈**：audioserver 重启、音效被冲掉之后，守护进程会自己发现（每 1.2 秒探活一次）、自己释放旧链、按 5 秒起步的退避节奏重建，不需要用户重开开关
+- 🩺 **可导出的诊断日志**：守护进程把事件写进 `files/sf_daemon.log`（同时仍打印到 logcat），设置页「音效诊断」可以一键**导出到系统下载目录**——不用连 adb 就能拿到完整的失败现场
 - 🌙 **Material 3 明暗主题**、毛玻璃卡片、iOS 风格底部 Dock，单页面简洁 UI
 - ✨ **克制的动效**：页面切换是方向感知的左右平移（点右边的页从右边滑入、点左边从左边滑入，旧页反向退场并叠淡），Dock 按下是图标微缩 + 胶囊泛色，没有水波纹方块
 - 📵 **零危险权限**：不申请 `RECORD_AUDIO`、`MODIFY_AUDIO_SETTINGS`、`WRITE_SETTINGS`、`FOREGROUND_SERVICE`、`POST_NOTIFICATIONS`
@@ -78,9 +79,12 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 能力 | 做法 | 说明 |
 |---|---|---|
-| **ROOT 全局音效** | 用 `su` 起一个 uid 0 的 `app_process` 守护进程（`RootDaemon`），在进程内把 `DynamicsProcessing` 挂到 session 0 | 普通 App 创建全局音效会被 AudioFlinger 以缺少 `MODIFY_AUDIO_ROUTING` 拒绝；uid 0 进程不受此限制，这是真机报「系统拒绝了音效创建」的正解 |
+| **ROOT 全局音效** | 用 `su` 起一个 uid 0 的 `app_process` 守护进程（`RootDaemon`），在进程内把 `DynamicsProcessing` 挂到 session 0 | 普通 App 创建全局音效会被 AudioFlinger 以缺少 `MODIFY_AUDIO_ROUTING` 拒绝；uid 0 进程不受此限制 |
 | **响度均衡** | `DynamicsProcessing` 的三段 MBC，挂在同一条链的 preEq 之后、limiter 之前 | 解决抖音 / 短视频「忽大忽小」：超过阈值的压下去、再加 makeup 补偿，动态范围收窄但整体响度不变；三段分频避免低频「抽气」 |
-| **释放全局音效通道** | `pm disable-user --user 0 <厂商音效包>` + `setprop ctl.restart audioserver` | 杜比 / DTS / 小米音效会独占 session 0 的音效链路，禁掉后本应用的音效才能挂上去；可随时恢复 |
+| **建链自愈** | 主循环里按 5 秒起步、最长 60 秒的指数退避重试 `ensure()`；每 1.2 秒发一次 binder 探活 | audioserver 重启会连底层 effect 一起带走，而 Java 句柄仍然非空。只判「对象非空」会一直报 FULL 其实早没生效，所以必须真实探活后重建 |
+
+> **1.6.0 移除了「释放全局音效通道」。** 它原本想用 `pm disable-user` 禁掉杜比 / 小米音效包再重启 audioserver，以「腾出 session 0 的音效槽位」。真机实测这个前提不成立：session 0 上的 MiSound 由 `/vendor/etc/audio/sku_art/audio_effects_config.xml` 在 HAL 层声明，禁用 APK 完全不影响它加载；反而 `ctl.restart audioserver` 会把本应用自己的音效链冲掉，还会让小米音效 App（耳机音效 / Sound ID / 自定义 EQ）打不开。收益为零，代价明确，所以整条能力连同它的开关一起去掉了。
+
 
 ### 守护进程
 
@@ -90,9 +94,12 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 - **心跳**：每 2 秒刷新一次状态文件的 `ts`；App 启动时读心跳，若发现它还在跑就自动接管界面状态（不会出现「显示已关闭但声音还在增强」）
 - **协议版本**：状态文件第一行是 `pv=<版本号>`。装新 APK 后旧守护进程仍在跑（`setsid` 脱离的 uid 0 进程，覆盖安装不会杀掉它），它的状态缺新字段，界面会误报「响度均衡不可用 / 输出路由未知」。App 启动时比对 `pv`，对不上就先杀掉再重拉，保证跑的永远是当前这版代码
 - **生命周期**：关闭开关写 `active=0`，守护进程自行释放音效并退出；配置文件被删除超过 5 秒也会自动退出
+- **建链重试**：`ensure()` 失败后记录时刻，由主循环在**心跳之后**按 5 / 10 / 20 / 40 / 60 秒退避重试；成功一次即清零。重试排在心跳后面，是因为失败时 binder 调用可能阻塞几十秒，放在前面会把状态文件的 `ts` 冻住、让界面误报「未运行」
+- **音效存活校验**：每 1.2 秒发一次 `setEnabled` 探活。`enabled` 属性读的是 AudioEffect 的本地缓存，audioserver 已死时不会变，不能用来判断；只有真实 binder 调用返回 `ERROR_DEAD_OBJECT` 才算失效，随后释放旧链并重建
+- **坏进程回收**：守护进程在跑但状态是 `ok=0 / paused=0 / 心跳新鲜` 时，App 点开关会先 `pkill` 再重拉，而不是复用那个已经废掉的进程
 - **后台常驻**：用 `setsid` 脱离 App 会话，并把 `oom_score_adj` 调到 `-900`，App 退出 / 被划掉后仍继续工作；**因此不需要前台服务，也不显示常驻通知**
 - **仍会失效的两种情况**：手动杀掉守护进程；手机重启（临时 ROOT 本身失效）
-- **日志**：`files/sf_daemon.log`，也可在设置页「音效诊断」里查看尾部
+- **日志**：两份文件都在 `files/` 下——`sf_daemon.log`（守护进程自己写的事件日志，0666 可读，128 KB 轮转）与 `sf_daemon.shell.log`（`app_process` 的 stdout/stderr，JVM 崩溃栈落在这里）。事件日志同时打印到 logcat，方便 adb 排查
 
 ## 原理与限制
 
@@ -101,7 +108,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 - 响度均衡用 `DynamicsProcessing` 的多段压缩（MBC）实现，不额外开第二条音效：三段分频 200Hz / 2kHz / 20kHz，阈值 -12 ~ -30 dBFS、压缩比 2:1 ~ 6:1 随强度线性变化，并带 makeup 补偿增益。强度为 0 时整段旁路，行为和没有这个功能一致。
 - 建链时先尝试带 MBC 的配置，失败再退回不带 MBC 的同一条链（少数机型 DSP 不支持多段压缩）；能力在诊断里以 `mbc=1/0` 报告。
 - 若机型拒绝创建 `DynamicsProcessing`（频段数不支持），守护进程会按 10 / 8 / 6 / 5 / 3 逐个重试；全部失败才退到单个 `LoudnessEnhancer`（无限幅，增益上限压到 +4 dB），并在诊断里写明。
-- 都失败时界面显示「系统拒绝了音效创建」，不会假装成功。
+- 都失败时界面显示真实原因（`DEAD_OBJECT`、`BAD_VALUE` 等错误码 + 尝试过的配置数），不再统一写成「系统拒绝创建音效」——那句话会把「audioserver 正在重启」误报成「权限被拒」，排查方向全错。
 - 均衡器频段数量与中心频率全部来自系统返回，界面按真实频段渲染；当前模式不支持的控件自动置灰。
 - 单声道写系统设置 `master_mono`，ROOT 下直接写，不需要「修改系统设置」权限。
 - 不申请 `RECORD_AUDIO`，不捕获任何音频数据，纯输出侧处理。
@@ -123,7 +130,10 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 同上。可先到 KernelSU 管理器的「超级用户」列表里手动授予 `com.sonicforge.app`。
 
 **开关能打开，但没声音变化**
-到设置页点「音效诊断」，看 `【ROOT 守护进程】` 段：`mode=FULL` 表示链路正常；`mode=DEGRADED` 表示只挂上了 LoudnessEnhancer；`error` 行会写明失败原因。把这段文本贴到 issue 里即可定位。
+到设置页点「音效诊断」，看这几行：`音效链生效：true` 且 `守护进程模式：FULL` 表示链路正常；`音效链生效：false` 会同时给出「失败原因」。想报 issue 时直接点弹窗里的「导出日志」，文件会存到系统「下载」目录，把它发出来即可，不需要连电脑。
+
+**点了开关没反应，或者显示「守护进程在运行但音效链没建起来」**
+这是 1.6.0 之前的老问题：守护进程建链失败后仍会一直运行，App 又只看「进程在不在」，于是一直复用它。现在点开关会自动杀掉这种坏进程再重拉；同时守护进程自己也会按退避节奏重试，通常不用你操作。
 
 **插上耳机后增强好像没了**
 这是预期行为。本应用只增强扬声器外放：守护进程每 1.2 秒检查一次当前输出设备，发现是耳机 / 蓝牙 / USB 声卡时会释放整条音效链，让耳机按设备原本的调音输出。拔掉耳机后 1 秒多就会自动恢复，主页副标题会显示「已连接耳机 · 增强已暂停」。
@@ -154,12 +164,39 @@ app/src/main/java/com/sonicforge/app/
 ├── root/
 │   ├── RootShell.kt               # su 探测与命令执行
 │   ├── RootDaemonClient.kt        # 守护进程的启停与文件通信
-│   └── RootAudioManager.kt        # 单声道 / 厂商音效开关（含旧版硬件增益的一次性还原）
+│   └── RootAudioManager.kt        # su 检测 / 系统单声道（含旧版硬件增益的一次性还原）
 └── ui/
-    ├── MainActivity.kt            # 单 Activity + Compose 入口
+    ├── MainActivity.kt            # 单 Activity + Compose 入口，含「导出日志」到下载目录
     ├── App.kt                     # 三页界面：主页 / 调节 / 设置
     └── theme/Theme.kt             # Material 3 主题
 ```
+
+## 更新日志
+
+### 1.6.0
+
+**修复（这三条都会表现为「开了没效果」）**
+
+- 建链失败后永不再试：以前只在配置文件发生变化时才调 `apply()`，audioserver 重启把音效冲掉后，只要用户不拖滑杆就一直是坏的。现在失败后按 5 / 10 / 20 / 40 / 60 秒退避重试，成功即清零，且重试排在心跳之后，不会阻塞状态刷新
+- 音效静默失效仍报 `FULL`：`ready` 原本只判断 Java 对象非空，底层 effect 随 audioserver 消失后依旧为真。现在每 1.2 秒发一次真实 binder 探活，失效就释放并重建
+- 坏进程被无限复用：`start()` 原本只比对协议版本，不看 `ok`。建链失败的进程会一直跑、一直写心跳，于是每次点开关都接管同一个坏进程。现在识别 `ok=0 / paused=0 / 心跳新鲜` 并先杀后拉
+
+**修复（诊断说假话）**
+
+- 「系统拒绝在 session 0 创建音效」是写死的兜底文案，真实异常被 `runCatching` 吞掉。现在逐条记录每个候选配置的失败原因与错误码
+- 诊断页把「进程在跑但建链失败」报成「守护进程未运行」。现在存活与「音效链生效」分开显示
+
+**新增**
+
+- 守护进程事件日志 `files/sf_daemon.log`（0666、128 KB 轮转），不再只进普通 App 读不到的 logcat
+- `app_process` 的 stdout/stderr 单独落到 `files/sf_daemon.shell.log`，JVM 崩溃栈不再丢失
+- 设置页「音效诊断」新增**导出日志**，走 MediaStore 存到系统下载目录，零权限、无需 adb
+- 诊断报告含机型、系统、增益折算、状态文件原文、下发配置原文、事件日志尾部与系统音效清单
+
+**移除**
+
+- 「释放全局音效通道」开关及其全部实现。真机实测它禁用不到 HAL 层声明的 MiSound / DAP，却会用一次 `ctl.restart audioserver` 冲掉本应用的音效链，并让小米音效 App 打不开
+
 
 ## 许可
 
